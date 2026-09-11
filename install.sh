@@ -1,0 +1,1165 @@
+#!/bin/zsh
+set -u
+
+APP_NAME="wechat-cli"
+LEGACY_APP_NAME="wx-mcp"
+WATCHER_LABEL="com.r266.wechat-cli-cache-watcher"
+LEGACY_WATCHER_LABEL="com.r266.wx-mcp-cache-watcher"
+SOURCE_DIR="${0:A:h}"
+DEFAULT_INSTALL_DIR="$HOME/.local/share/wechat-cli"
+INSTALL_DIR="${WECHAT_CLI_INSTALL_DIR:-$DEFAULT_INSTALL_DIR}"
+LEGACY_INSTALL_DIR="$HOME/.local/share/wx-mcp"
+INSTALL_MARKER=".wechat-cli-install"
+BIN_DIR="${WECHAT_CLI_BIN_DIR:-$HOME/.local/bin}"
+SHIM_PATH="$BIN_DIR/$APP_NAME"
+LOG_DIR="${WECHAT_CLI_LOG_DIR:-$HOME/Library/Logs/wechat-cli}"
+INSTALL_LOG="$LOG_DIR/install.log"
+LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
+PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
+LEGACY_PLIST_PATH="$LAUNCH_AGENTS_DIR/$LEGACY_WATCHER_LABEL.plist"
+WATCHER_INTERVAL=300
+
+JSON=0
+ASSUME_YES=0
+DRY_RUN=0
+MODE="install"
+DO_BOOTSTRAP=0
+DO_REFRESH=0
+DO_WATCHER=0
+DO_ASR=0
+PURGE_STATE=0
+
+case "${WECHAT_CLI_WITH_ASR:-0}" in
+  1|true|TRUE|yes|YES|on|ON)
+    DO_ASR=1
+    ;;
+esac
+
+CLI_MODE=""
+CLI_SOURCE=""
+WXKEY_MODE=""
+WXKEY_SOURCE=""
+LIB_SOURCE=""
+
+WATCHER_INSTALLED=0
+BOOTSTRAP_RAN=0
+REFRESH_RAN=0
+ASR_RAN=0
+INSTALL_STATUS="ok"
+BLOCKED_BY=""
+NEXT_ACTION=""
+
+typeset -a ACTIONS
+typeset -a WARNINGS
+typeset -a ERRORS
+typeset -a CHECKS
+
+usage() {
+  cat <<'EOF'
+Usage:
+  ./install.sh [--all] [--yes] [--json]
+  ./install.sh --update [--yes] [--json]
+  ./install.sh --doctor [--json]
+  ./install.sh --dry-run --all --json
+  ./install.sh --uninstall --yes [--json]
+  ./install.sh --uninstall --purge-state --yes [--json]
+  ./install.sh --clear-state --yes [--json]
+
+Install options:
+  --all                     Install CLI, run wxkey bootstrap, and refresh
+                            metadata cache (does NOT install watcher; add
+                            --watcher explicitly if you want periodic
+                            background refresh — see README on TCC trade-off).
+  --update                  Update an existing git checkout with
+                            `git pull --ff-only`, then reinstall binaries.
+                            Does not bootstrap, refresh metadata cache, or
+                            touch watcher unless those flags are added.
+  --bootstrap               Run wxkey bootstrap after installing binaries.
+  --refresh                 Start wechat-cli metadata cache refresh after installing binaries.
+                            Defaults to background warmup; set
+                            WECHAT_CLI_INSTALL_SYNC_REFRESH=1 for foreground wait.
+  --with-asr                Install optional local voice transcription runtime
+                            under ~/.wechat-cli/asr-venv and preload
+                            faster-whisper large-v3.
+  --watcher                 Install launchd cache watcher (5-min periodic
+                            metadata cache refresh). WARNING: on macOS 15+ each refresh
+                            triggers a "wechat-cli wants to access another app's
+                            data" TCC prompt unless wechat-cli has Full Disk Access
+                            granted in System Settings → Privacy & Security.
+  --install-dir PATH        Default: ~/.local/share/wechat-cli
+  --bin-dir PATH            Directory for the `wechat-cli` command shim.
+                            Default: ~/.local/bin
+  --watcher-interval SEC    Default: 300.
+  --yes                     Non-interactive approval for side effects.
+  --json                    Emit a single JSON result to stdout.
+  --dry-run                 Report planned actions without writing.
+  --doctor                  Check local install prerequisites/status.
+  --uninstall               Remove installed files and watcher plist.
+  --purge-state             With --uninstall, also remove wechat-cli state:
+                            ~/.config/wxcli/config.json, ~/.wechat-cli, legacy state dirs,
+                            logs, and the wxkey Keychain sudo credential.
+  --clear-state             Only remove wechat-cli state; keep installed binaries.
+
+Environment:
+  WECHAT_CLI_INSTALL_DIR    Override install directory.
+  WECHAT_CLI_BIN_DIR        Override CLI command shim directory.
+  WECHAT_CLI_WCDB_DYLIB     Existing libWCDB.dylib to copy.
+  WXKEY_SRC                 Source checkout for wxkey when installing from source.
+  WXKEY_BIN                 Existing wxkey binary to copy.
+  WXKEY_GO_INSTALL          Go package/version for source fallback
+                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8).
+EOF
+}
+
+json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  print -r -- "$s"
+}
+
+xml_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  print -r -- "$s"
+}
+
+shell_escape() {
+  print -r -- "${(q)1}"
+}
+
+json_bool() {
+  if [[ "$1" -eq 1 ]]; then
+    print -n "true"
+  else
+    print -n "false"
+  fi
+}
+
+json_array() {
+  local first=1 item
+  print -n "["
+  for item in "$@"; do
+    if [[ "$first" -eq 0 ]]; then
+      print -n ", "
+    fi
+    first=0
+    print -n "\"$(json_escape "$item")\""
+  done
+  print -n "]"
+}
+
+emit_json() {
+  local ok="$1"
+  print "{"
+  print "  \"ok\": $ok,"
+  print "  \"mode\": \"$(json_escape "$MODE")\","
+  print "  \"status\": \"$(json_escape "$INSTALL_STATUS")\","
+  print "  \"blocked_by\": \"$(json_escape "$BLOCKED_BY")\","
+  print "  \"next_action\": \"$(json_escape "$NEXT_ACTION")\","
+  print "  \"source_dir\": \"$(json_escape "$SOURCE_DIR")\","
+  print "  \"install_dir\": \"$(json_escape "$INSTALL_DIR")\","
+  print "  \"bin_dir\": \"$(json_escape "$BIN_DIR")\","
+  print "  \"shim_path\": \"$(json_escape "$SHIM_PATH")\","
+  print "  \"watcher_label\": \"$(json_escape "$WATCHER_LABEL")\","
+  print "  \"watcher_interval\": $WATCHER_INTERVAL,"
+  print "  \"log\": \"$(json_escape "$INSTALL_LOG")\","
+  print "  \"watcher_installed\": $(json_bool "$WATCHER_INSTALLED"),"
+  print "  \"bootstrap_ran\": $(json_bool "$BOOTSTRAP_RAN"),"
+  print "  \"refresh_ran\": $(json_bool "$REFRESH_RAN"),"
+  print "  \"asr_ran\": $(json_bool "$ASR_RAN"),"
+  print "  \"purge_state\": $(json_bool "$PURGE_STATE"),"
+  print -n "  \"checks\": "; json_array "${CHECKS[@]}"; print ","
+  print -n "  \"actions\": "; json_array "${ACTIONS[@]}"; print ","
+  print -n "  \"warnings\": "; json_array "${WARNINGS[@]}"; print ","
+  print -n "  \"errors\": "; json_array "${ERRORS[@]}"; print ""
+  print "}"
+}
+
+print_human_result() {
+  local ok="$1"
+  print
+  if [[ "$ok" == "true" ]]; then
+    print "$APP_NAME $MODE complete"
+  else
+    print "$APP_NAME $MODE failed"
+  fi
+  print "  status: $INSTALL_STATUS"
+  print "  install_dir: $INSTALL_DIR"
+  print "  command: $SHIM_PATH"
+  [[ -n "$BLOCKED_BY" ]] && print "  blocked_by: $BLOCKED_BY"
+  [[ -n "$NEXT_ACTION" ]] && print "  next: $NEXT_ACTION"
+  [[ "$BOOTSTRAP_RAN" -eq 1 ]] && print "  key_setup: complete"
+  [[ "$REFRESH_RAN" -eq 1 ]] && print "  metadata_cache: started"
+  [[ "$ASR_RAN" -eq 1 ]] && print "  voice_asr: installed"
+  [[ "$WATCHER_INSTALLED" -eq 1 ]] && print "  watcher: installed"
+  if [[ "${#WARNINGS[@]}" -gt 0 ]]; then
+    print "  warnings:"
+    local warning
+    for warning in "${WARNINGS[@]}"; do
+      print "    - $warning"
+    done
+  fi
+  if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
+    print
+    local verify_cmd
+    if path_has_bin_dir; then
+      verify_cmd="$APP_NAME sessions --limit 5 --pretty"
+    else
+      verify_cmd="$SHIM_PATH sessions --limit 5 --pretty"
+    fi
+    if [[ "$BOOTSTRAP_RAN" -eq 1 ]]; then
+      print "Next: run $verify_cmd to verify WeChat data access."
+    else
+      print "Next: run $INSTALL_DIR/wxkey bootstrap, then run $verify_cmd to verify WeChat data access."
+    fi
+    print "macOS quiet mode: add $INSTALL_DIR/$APP_NAME and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
+  fi
+}
+
+finish() {
+  local ok="$1"
+  if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) && -z "$NEXT_ACTION" ]]; then
+    local verify_cmd
+    if path_has_bin_dir; then
+      verify_cmd="$APP_NAME sessions --limit 5 --pretty"
+    else
+      verify_cmd="$SHIM_PATH sessions --limit 5 --pretty"
+    fi
+    if [[ "$BOOTSTRAP_RAN" -eq 1 ]]; then
+      NEXT_ACTION="Run $verify_cmd to verify WeChat data access."
+    else
+      NEXT_ACTION="Run $INSTALL_DIR/wxkey bootstrap, then run $verify_cmd to verify WeChat data access."
+    fi
+  fi
+  if [[ "$JSON" -eq 1 ]]; then
+    emit_json "$ok"
+  else
+    print_human_result "$ok"
+  fi
+}
+
+mark_dry_run_result() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    INSTALL_STATUS="dry_run"
+    [[ -n "$NEXT_ACTION" ]] || NEXT_ACTION="Dry run only; rerun without --dry-run to apply changes."
+  fi
+}
+
+say() {
+  if [[ "$JSON" -eq 1 ]]; then
+    ensure_log_dir
+    print -r -- "$*" >> "$INSTALL_LOG"
+  else
+    print -r -- "$*"
+  fi
+}
+
+warn() {
+  WARNINGS+=("$1")
+  if [[ "$JSON" -ne 1 ]]; then
+    print -r -- "WARN: $1" >&2
+  fi
+}
+
+die() {
+  local msg="$1"
+  local code="${2:-1}"
+  ERRORS+=("$msg")
+  if [[ "$JSON" -eq 1 ]]; then
+    emit_json false
+  else
+    print -r -- "ERROR: $msg" >&2
+  fi
+  exit "$code"
+}
+
+ensure_log_dir() {
+  mkdir -p "$LOG_DIR"
+}
+
+run_logged() {
+  if [[ "$JSON" -eq 1 ]]; then
+    ensure_log_dir
+    {
+      print -r -- ""
+      print -r -- ">>> $*"
+    } >> "$INSTALL_LOG"
+    "$@" >> "$INSTALL_LOG" 2>&1
+  else
+    "$@"
+  fi
+}
+
+run_logged_in() {
+  local dir="$1"
+  shift
+  ( cd "$dir" && run_logged "$@" )
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+path_has_bin_dir() {
+  local dir
+  for dir in ${(s.:.)PATH}; do
+    [[ "$dir" == "$BIN_DIR" ]] && return 0
+  done
+  return 1
+}
+
+same_file() {
+  [[ -e "$1" && -e "$2" && "$1" -ef "$2" ]]
+}
+
+sign_macho_ad_hoc() {
+  local macho_path="$1"
+  [[ "${OSTYPE:-}" == darwin* ]] || return 0
+  [[ -x /usr/bin/codesign ]] || return 0
+  run_logged /usr/bin/codesign --force --sign - "$macho_path" || return 1
+}
+
+atomic_install_path() {
+  local src="$1"
+  local dest="$2"
+  local mode="$3"
+  local sign="${4:-0}"
+  local label="${5:-$(basename "$dest")}"
+  local dir base tmp
+  dir="$(dirname "$dest")"
+  base="$(basename "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.${base}.tmp.XXXXXX")" || die "create temporary install path for $label failed" 1
+  if ! cp "$src" "$tmp"; then
+    rm -f "$tmp"
+    die "copy $label failed" 1
+  fi
+  if ! chmod "$mode" "$tmp"; then
+    rm -f "$tmp"
+    die "chmod $label failed" 1
+  fi
+  if [[ "$sign" -eq 1 ]]; then
+    if ! sign_macho_ad_hoc "$tmp"; then
+      rm -f "$tmp"
+      die "codesign $label failed; see $INSTALL_LOG" 1
+    fi
+  fi
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    die "install $label failed" 1
+  fi
+}
+
+build_install_go_binary() {
+  local src_dir="$1"
+  local pkg="$2"
+  local dest="$3"
+  local label="$4"
+  local dir base tmp
+  dir="$(dirname "$dest")"
+  base="$(basename "$dest")"
+  mkdir -p "$dir"
+  tmp="$(mktemp "$dir/.${base}.tmp.XXXXXX")" || die "create temporary build path for $label failed" 1
+  if ! run_logged_in "$src_dir" env CGO_ENABLED=0 go build -o "$tmp" "$pkg"; then
+    rm -f "$tmp"
+    die "build $label failed; see $INSTALL_LOG" 1
+  fi
+  if ! chmod +x "$tmp"; then
+    rm -f "$tmp"
+    die "chmod $label failed" 1
+  fi
+  if ! sign_macho_ad_hoc "$tmp"; then
+    rm -f "$tmp"
+    die "codesign $label failed; see $INSTALL_LOG" 1
+  fi
+  if ! mv -f "$tmp" "$dest"; then
+    rm -f "$tmp"
+    die "install $label failed" 1
+  fi
+}
+
+expand_path() {
+  local p="$1"
+  p="${p/#\~/$HOME}"
+  print -r -- "$p"
+}
+
+canonical_path() {
+  local p="$1"
+  [[ -n "$p" ]] || return 1
+  p="${p/#\~/$HOME}"
+  print -r -- "${p:A}"
+}
+
+install_dir_is_known() {
+  local resolved="$1"
+  [[ "$resolved" == "$(canonical_path "$DEFAULT_INSTALL_DIR")" || "$resolved" == "$(canonical_path "$LEGACY_INSTALL_DIR")" ]]
+}
+
+install_dir_looks_managed() {
+  local resolved="$1"
+  if [[ -f "$resolved/$INSTALL_MARKER" ]] && [[ "$(head -n 1 "$resolved/$INSTALL_MARKER" 2>/dev/null)" == "name=$APP_NAME" ]]; then
+    return 0
+  fi
+  [[ -f "$resolved/$APP_NAME" || -f "$resolved/$LEGACY_APP_NAME" ]] &&
+    [[ -f "$resolved/wxkey" ]] &&
+    [[ -f "$resolved/libWCDB.dylib" ]]
+}
+
+validate_install_dir_safety() {
+  local resolved home source bin
+  resolved="$(canonical_path "$INSTALL_DIR")" || die "install directory must not be empty" 2
+  home="$(canonical_path "$HOME")"
+  source="$(canonical_path "$SOURCE_DIR")"
+  bin="$(canonical_path "$BIN_DIR")"
+
+  case "$resolved" in
+    /|/Applications|/Library|/System|/Users|/bin|/sbin|/usr|/usr/bin|/usr/sbin|/usr/lib|/usr/libexec|/usr/share|\
+    /usr/local|/usr/local/bin|/usr/local/sbin|/usr/local/lib|/opt|/opt/homebrew|/opt/homebrew/bin|/opt/homebrew/sbin|\
+    /private|/private/tmp|/private/var|/private/var/tmp|/tmp|/var|\
+    "$home"|"$home/bin"|"$home/Desktop"|"$home/Documents"|"$home/Downloads"|"$home/Applications"|\
+    "$home/.local"|"$home/.local/bin"|"$home/.local/share"|"$home/.config"|"$home/.cache"|\
+    "$home/Library"|"$home/Library/Application Support"|"$home/Library/Logs"|\
+    "$source"|"$bin")
+      die "refusing unsafe install directory: $INSTALL_DIR" 2
+      ;;
+  esac
+
+  if [[ "$MODE" == "install" || "$MODE" == "update" ]]; then
+    [[ "$(uname -s)" == "Darwin" ]] || die "install.sh supports macOS only" 2
+    [[ "$(uname -m)" == "arm64" ]] || die "install.sh supports macOS arm64 only" 2
+    if [[ -d "$resolved" ]] && ! install_dir_is_known "$resolved" && ! install_dir_looks_managed "$resolved"; then
+      local first_entry
+      first_entry="$(find "$resolved" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"
+      [[ -z "$first_entry" ]] || die "refusing to install into non-empty unrecognized directory: $INSTALL_DIR" 2
+    fi
+  elif [[ "$MODE" == "uninstall" && -e "$resolved" ]] && ! install_dir_is_known "$resolved" && ! install_dir_looks_managed "$resolved"; then
+    die "refusing to uninstall unrecognized directory without $INSTALL_MARKER or a complete legacy install: $INSTALL_DIR" 2
+  fi
+}
+
+parse_args() {
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --help|-h)
+        usage
+        exit 0
+        ;;
+      --json)
+        JSON=1
+        shift
+        ;;
+      --yes|-y)
+        ASSUME_YES=1
+        shift
+        ;;
+      --dry-run)
+        DRY_RUN=1
+        shift
+        ;;
+      --doctor)
+        MODE="doctor"
+        shift
+        ;;
+      --uninstall)
+        MODE="uninstall"
+        shift
+        ;;
+      --clear-state)
+        MODE="clear-state"
+        PURGE_STATE=1
+        shift
+        ;;
+      --purge-state)
+        PURGE_STATE=1
+        shift
+        ;;
+      --update)
+        MODE="update"
+        shift
+        ;;
+      --all)
+        DO_BOOTSTRAP=1
+        DO_REFRESH=1
+        # watcher intentionally NOT in --all: on macOS 15+ the periodic
+        # cross-container access triggers TCC re-prompts ("wechat-cli 想访问其他
+        # App 的数据") repeatedly for ad-hoc signed binaries. Users who
+        # actually want background metadata cache refresh can pass --watcher.
+        shift
+        ;;
+      --bootstrap)
+        DO_BOOTSTRAP=1
+        shift
+        ;;
+      --no-bootstrap)
+        DO_BOOTSTRAP=0
+        shift
+        ;;
+      --refresh)
+        DO_REFRESH=1
+        shift
+        ;;
+      --no-refresh)
+        DO_REFRESH=0
+        shift
+        ;;
+      --with-asr)
+        DO_ASR=1
+        shift
+        ;;
+      --no-asr)
+        DO_ASR=0
+        shift
+        ;;
+      --watcher)
+        DO_WATCHER=1
+        shift
+        ;;
+      --no-watcher)
+        DO_WATCHER=0
+        shift
+        ;;
+      --install-dir)
+        [[ "$#" -ge 2 ]] || die "--install-dir requires a value" 2
+        INSTALL_DIR="$(expand_path "$2")"
+        shift 2
+        ;;
+      --install-dir=*)
+        INSTALL_DIR="$(expand_path "${1#*=}")"
+        shift
+        ;;
+      --bin-dir)
+        [[ "$#" -ge 2 ]] || die "--bin-dir requires a value" 2
+        BIN_DIR="$(expand_path "$2")"
+        shift 2
+        ;;
+      --bin-dir=*)
+        BIN_DIR="$(expand_path "${1#*=}")"
+        shift
+        ;;
+      --watcher-interval)
+        [[ "$#" -ge 2 ]] || die "--watcher-interval requires a value" 2
+        WATCHER_INTERVAL="$2"
+        shift 2
+        ;;
+      --watcher-interval=*)
+        WATCHER_INTERVAL="${1#*=}"
+        shift
+        ;;
+      *)
+        die "unknown argument: $1" 2
+        ;;
+    esac
+  done
+
+  if [[ "$PURGE_STATE" -eq 1 && "$MODE" != "uninstall" && "$MODE" != "clear-state" ]]; then
+    die "--purge-state is only valid with --uninstall; use --clear-state to remove state without uninstalling" 2
+  fi
+  [[ "$WATCHER_INTERVAL" =~ ^[0-9]+$ ]] || die "--watcher-interval must be an integer" 2
+  if [[ "$WATCHER_INTERVAL" -lt 60 ]]; then
+    warn "watcher interval below 60s is allowed but may overlap long metadata cache refreshes"
+  fi
+}
+
+confirm_or_die() {
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  if [[ "$ASSUME_YES" -eq 1 ]]; then
+    return
+  fi
+  if [[ "$JSON" -eq 1 || ! -t 0 ]]; then
+    die "non-interactive run requires --yes" 2
+  fi
+  print -n "Proceed with $MODE into $INSTALL_DIR? [y/N] "
+  local ans
+  read ans
+  case "$ans" in
+    y|Y|yes|YES) ;;
+    *) die "cancelled" 1 ;;
+  esac
+}
+
+resolve_components() {
+  if [[ -f "$SOURCE_DIR/cmd/wechat-cli/main.go" ]]; then
+    if have_cmd go; then
+      CLI_MODE="build"
+      CLI_SOURCE="$SOURCE_DIR"
+    elif [[ -x "$SOURCE_DIR/$APP_NAME" ]]; then
+      CLI_MODE="copy"
+      CLI_SOURCE="$SOURCE_DIR/$APP_NAME"
+      warn "go not found; using existing $APP_NAME binary from source dir"
+    elif [[ -x "$SOURCE_DIR/$LEGACY_APP_NAME" ]]; then
+      CLI_MODE="copy"
+      CLI_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
+      warn "go not found; using legacy $LEGACY_APP_NAME binary from source dir"
+    else
+      ERRORS+=("go not found and no $APP_NAME binary available")
+    fi
+  elif [[ -x "$SOURCE_DIR/$APP_NAME" ]]; then
+    CLI_MODE="copy"
+    CLI_SOURCE="$SOURCE_DIR/$APP_NAME"
+  elif [[ -x "$SOURCE_DIR/$LEGACY_APP_NAME" ]]; then
+    CLI_MODE="copy"
+    CLI_SOURCE="$SOURCE_DIR/$LEGACY_APP_NAME"
+  else
+    ERRORS+=("$APP_NAME source or binary not found under $SOURCE_DIR")
+  fi
+
+  if [[ -x "$SOURCE_DIR/wxkey" ]]; then
+    WXKEY_MODE="copy"
+    WXKEY_SOURCE="$SOURCE_DIR/wxkey"
+  elif [[ -n "${WXKEY_SRC:-}" && -f "$WXKEY_SRC/cmd/wxkey/main.go" && -n "$(command -v go 2>/dev/null)" ]]; then
+    WXKEY_MODE="build"
+    WXKEY_SOURCE="$WXKEY_SRC"
+  elif [[ -f "$SOURCE_DIR/../wxkey/cmd/wxkey/main.go" && -n "$(command -v go 2>/dev/null)" ]]; then
+    WXKEY_MODE="build"
+    WXKEY_SOURCE="$SOURCE_DIR/../wxkey"
+  elif [[ -n "${WXKEY_BIN:-}" && -x "$WXKEY_BIN" ]]; then
+    WXKEY_MODE="copy"
+    WXKEY_SOURCE="$WXKEY_BIN"
+  elif [[ -x "$SOURCE_DIR/../wxkey/wxkey" ]]; then
+    WXKEY_MODE="copy"
+    WXKEY_SOURCE="$SOURCE_DIR/../wxkey/wxkey"
+  elif have_cmd go; then
+    WXKEY_MODE="go-install"
+    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8}"
+  elif have_cmd wxkey; then
+    WXKEY_MODE="copy"
+    WXKEY_SOURCE="$(command -v wxkey)"
+  else
+    ERRORS+=("wxkey binary/source not found; install Go, use release zip with wxkey, set WXKEY_SRC, or set WXKEY_BIN")
+  fi
+
+  local cand
+  for cand in "${WECHAT_CLI_WCDB_DYLIB:-}" "$SOURCE_DIR/libWCDB.dylib" "$SOURCE_DIR/lib/libWCDB.dylib" "$HOME/.config/wxcli/lib/libWCDB.dylib" "$INSTALL_DIR/libWCDB.dylib" "$LEGACY_INSTALL_DIR/libWCDB.dylib"; do
+    if [[ -f "$cand" ]]; then
+      LIB_SOURCE="$cand"
+      break
+    fi
+  done
+  if [[ -z "$LIB_SOURCE" ]]; then
+    ERRORS+=("libWCDB.dylib not found; use release zip, set WECHAT_CLI_WCDB_DYLIB, or place it at ./lib/libWCDB.dylib / ~/.config/wxcli/lib/libWCDB.dylib")
+  fi
+
+  [[ -n "$CLI_MODE" ]] && ACTIONS+=("$CLI_MODE $APP_NAME from $CLI_SOURCE")
+  [[ -n "$WXKEY_MODE" ]] && ACTIONS+=("$WXKEY_MODE wxkey from $WXKEY_SOURCE")
+  [[ -n "$LIB_SOURCE" ]] && ACTIONS+=("copy libWCDB.dylib from $LIB_SOURCE")
+}
+
+install_components() {
+  resolve_components
+  if [[ "${#ERRORS[@]}" -gt 0 ]]; then
+    die "component resolution failed" 1
+  fi
+  ACTIONS+=("install files into $INSTALL_DIR")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+
+  mkdir -p "$INSTALL_DIR"
+  print -r -- "name=$APP_NAME" > "$INSTALL_DIR/$INSTALL_MARKER" || die "write install marker failed" 1
+
+  if [[ "$CLI_MODE" == "build" ]]; then
+    build_install_go_binary "$CLI_SOURCE" ./cmd/wechat-cli "$INSTALL_DIR/$APP_NAME" "$APP_NAME"
+  else
+    atomic_install_path "$CLI_SOURCE" "$INSTALL_DIR/$APP_NAME" 755 1 "$APP_NAME"
+  fi
+
+  if [[ "$WXKEY_MODE" == "build" ]]; then
+    build_install_go_binary "$WXKEY_SOURCE" ./cmd/wxkey "$INSTALL_DIR/wxkey" "wxkey"
+  elif [[ "$WXKEY_MODE" == "go-install" ]]; then
+    local gobin_tmp
+    gobin_tmp="$(mktemp -d "${TMPDIR:-/tmp}/wechat-cli-gobin.XXXXXX")" || die "create temporary wxkey install dir failed" 1
+    if ! run_logged env CGO_ENABLED=0 GOBIN="$gobin_tmp" go install "$WXKEY_SOURCE"; then
+      rm -rf "$gobin_tmp"
+      die "install wxkey from GitHub failed; see $INSTALL_LOG" 1
+    fi
+    atomic_install_path "$gobin_tmp/wxkey" "$INSTALL_DIR/wxkey" 755 1 "wxkey"
+    rm -rf "$gobin_tmp"
+  else
+    atomic_install_path "$WXKEY_SOURCE" "$INSTALL_DIR/wxkey" 755 1 "wxkey"
+  fi
+
+  if [[ "$LIB_SOURCE" != "$INSTALL_DIR/libWCDB.dylib" ]]; then
+    atomic_install_path "$LIB_SOURCE" "$INSTALL_DIR/libWCDB.dylib" 644 1 "libWCDB.dylib"
+  fi
+}
+
+install_cli_shim() {
+  SHIM_PATH="$BIN_DIR/$APP_NAME"
+  ACTIONS+=("link CLI command $SHIM_PATH -> $INSTALL_DIR/$APP_NAME")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+
+  mkdir -p "$BIN_DIR"
+  if [[ -e "$SHIM_PATH" && ! -L "$SHIM_PATH" ]] && ! same_file "$SHIM_PATH" "$INSTALL_DIR/$APP_NAME"; then
+    warn "not replacing existing non-symlink command at $SHIM_PATH; run $INSTALL_DIR/$APP_NAME directly or remove that file"
+    return
+  fi
+  ln -sfn "$INSTALL_DIR/$APP_NAME" "$SHIM_PATH" || die "create CLI command shim failed: $SHIM_PATH" 1
+  if ! path_has_bin_dir; then
+    warn "$BIN_DIR is not in PATH; add it to your shell profile or run $SHIM_PATH"
+  fi
+}
+
+update_source() {
+  if [[ -d "$SOURCE_DIR/.git" ]]; then
+    ACTIONS+=("git pull --ff-only in $SOURCE_DIR")
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      return
+    fi
+    run_logged_in "$SOURCE_DIR" git pull --ff-only || die "git update failed; resolve the checkout or download the latest release zip" 1
+    return
+  fi
+  warn "source_dir is not a git checkout; --update will install the release files in this directory. If you are not using install-release.sh, download the newest release zip first."
+}
+
+classify_install_log_blocker() {
+  local text=""
+  if [[ -f "$INSTALL_LOG" ]]; then
+    text="$(tail -120 "$INSTALL_LOG" 2>/dev/null)"
+  fi
+  case "$text" in
+    *"sudo password prompt cancelled or failed"*|*"prepare stored sudo credential"*|*"empty sudo password"*)
+      BLOCKED_BY="desktop_password_prompt_required"
+      NEXT_ACTION="Open a local Mac desktop session and run $INSTALL_DIR/wxkey bootstrap (no sudo). Enter the admin password in the hidden wechat-cli prompt, then rerun install."
+      ;;
+    *"WeChat is not ready yet"*|*"WeChat process not running"*|*"no WeChat 4.x account directory"*)
+      BLOCKED_BY="wechat_not_ready"
+      NEXT_ACTION="Open WeChat, finish login, open one chat, then rerun ./install.sh --bootstrap --refresh --yes --json."
+      ;;
+    *"Operation not permitted"*|*"codesign WeChat failed"*|*"app-management"*|*"App Management"*)
+      BLOCKED_BY="app_management_denied"
+      NEXT_ACTION="Grant App Management/Full Disk Access if macOS requests it, then rerun ./install.sh --bootstrap --refresh --yes --json."
+      ;;
+    *"Full Disk Access"*|*"TCC"*|*"another app"*)
+      BLOCKED_BY="full_disk_access"
+      NEXT_ACTION="Grant Full Disk Access to ~/.local/share/wechat-cli/wechat-cli and ~/.local/share/wechat-cli/wxkey, then rerun install."
+      ;;
+    *"PBKDF diagnostics:"*"pbkdf_calls=0"*)
+      BLOCKED_BY="key_not_found"
+      NEXT_ACTION="Update wechat-cli, then rerun WXKEY_PBKDF_PROBE_TIMEOUT=5m $INSTALL_DIR/wxkey bootstrap. The latest PBKDF fallback stops existing WeChat before launching the debugged instance; keep that WeChat logged in and open one normal chat so DB decryption runs."
+      ;;
+    *"PBKDF diagnostics:"*"matching_db_salt_calls=0"*)
+      BLOCKED_BY="db_root_mismatch"
+      NEXT_ACTION="PBKDF ran but did not match the selected DB salts. Verify the WeChat account root, then rerun with WECHAT_CLI_DB_ROOT or $INSTALL_DIR/wxkey bootstrap --root pointing at the account directory that contains db_storage."
+      ;;
+    *"PBKDF diagnostics:"*)
+      BLOCKED_BY="key_not_found"
+      NEXT_ACTION="PBKDF saw matching salts but no usable key verified. Update wechat-cli, rerun $INSTALL_DIR/wxkey bootstrap, and if it still fails send the PBKDF diagnostics; this may be a WeChat derivation change."
+      ;;
+    *"no keys found"*|*"usable DB key"*|*"found=0"*)
+      BLOCKED_BY="key_not_found"
+      NEXT_ACTION="Keep WeChat open, open the target chat/page, then rerun $INSTALL_DIR/wxkey bootstrap. If it reaches PBKDF fallback, read the PBKDF diagnostics to distinguish no DB decrypt, wrong DB root, or unsupported derivation."
+      ;;
+    *"scan deadline exceeded"*|*"timed out after"*)
+      BLOCKED_BY="key_scan_timeout"
+      NEXT_ACTION="Keep WeChat open, open the chats/pages that need decrypting, then rerun $INSTALL_DIR/wxkey bootstrap. The previous scan timed out instead of hanging."
+      ;;
+    *"task_for_pid"*|*"not permitted"*)
+      BLOCKED_BY="task_for_pid_denied"
+      NEXT_ACTION="Rerun ./wxkey bootstrap from the Mac desktop session and enter the wechat-cli hidden admin-password prompt."
+      ;;
+    *)
+      BLOCKED_BY="bootstrap_failed"
+      NEXT_ACTION="Inspect the install log and rerun ./wxkey doctor; do not disable SIP."
+      ;;
+  esac
+}
+
+run_bootstrap() {
+  [[ "$DO_BOOTSTRAP" -eq 1 ]] || return
+  ACTIONS+=("run wxkey bootstrap")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  if ! run_logged "$INSTALL_DIR/wxkey" bootstrap; then
+    if [[ -f "$INSTALL_LOG" ]]; then
+      local trail
+      trail=$(grep -E '^\[wxkey\]|^\[FAIL\]|ERROR:|re-elevate|task_for_pid' "$INSTALL_LOG" 2>/dev/null | tail -5 | tr '\n' '|')
+      [[ -n "$trail" ]] && ERRORS+=("wxkey log tail: ${trail%|}")
+    fi
+    INSTALL_STATUS="blocked"
+    classify_install_log_blocker
+    die "wxkey bootstrap failed; see $INSTALL_LOG. If the macOS password prompt did not appear, open a local Mac desktop session and re-run \`$INSTALL_DIR/wxkey bootstrap\` directly (no sudo)." 1
+  fi
+  BOOTSTRAP_RAN=1
+}
+
+run_cache_refresh() {
+  [[ "$DO_REFRESH" -eq 1 ]] || return
+  ACTIONS+=("start wechat-cli metadata cache refresh in background")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  if [[ "${WECHAT_CLI_INSTALL_SYNC_REFRESH:-0}" == "1" ]]; then
+    ACTIONS+=("run wechat-cli metadata cache refresh in foreground because WECHAT_CLI_INSTALL_SYNC_REFRESH=1")
+    run_logged "$INSTALL_DIR/$APP_NAME" cache refresh || die "metadata cache refresh failed; see $INSTALL_LOG" 1
+    INSTALL_STATUS="ready"
+  else
+    run_logged "$INSTALL_DIR/$APP_NAME" cache refresh --background || die "metadata cache refresh background start failed; see $INSTALL_LOG" 1
+    INSTALL_STATUS="warming_cache"
+    NEXT_ACTION="wechat-cli is installed; metadata cache refresh is warming in the background and name/session tools will freshness-check before returning data."
+    CHECKS+=("cache_refresh_background=true")
+  fi
+  REFRESH_RAN=1
+}
+
+run_asr_setup() {
+  [[ "$DO_ASR" -eq 1 ]] || return
+  ACTIONS+=("run wechat-cli asr setup")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  run_logged "$INSTALL_DIR/$APP_NAME" asr setup || die "ASR setup failed; see $INSTALL_LOG. Run $INSTALL_DIR/$APP_NAME asr status --pretty for diagnostics." 1
+  ASR_RAN=1
+  CHECKS+=("asr_setup=true")
+}
+
+write_watcher_script() {
+  local script="$INSTALL_DIR/watcher.sh"
+  cat > "$script" <<EOF
+#!/usr/bin/env zsh
+set -u
+
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+INSTALL_DIR=$(shell_escape "$INSTALL_DIR")
+LOG_DIR="\$HOME/Library/Logs/wechat-cli"
+STATE_DIR="\$HOME/.wechat-cli"
+LOCK_DIR="\$STATE_DIR/cache-refresh.lock"
+LOG_FILE="\$LOG_DIR/cache-watcher.log"
+
+mkdir -p "\$LOG_DIR" "\$STATE_DIR"
+
+if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
+  now=\$(date +%s)
+  mod=\$(stat -f %m "\$LOCK_DIR" 2>/dev/null || echo 0)
+  if [[ "\$mod" == <-> && \$((now - mod)) -gt 7200 ]]; then
+    rmdir "\$LOCK_DIR" 2>/dev/null || true
+    mkdir "\$LOCK_DIR" 2>/dev/null || exit 0
+  else
+    echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') skip: refresh already running" >> "\$LOG_FILE"
+    exit 0
+  fi
+fi
+trap 'rmdir "\$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
+
+echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh start" >> "\$LOG_FILE"
+WECHAT_CLI_CACHE_LOCK_HELD=1 "\$INSTALL_DIR/$APP_NAME" cache refresh >> "\$LOG_FILE" 2>&1
+rc=\$?
+echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh exit=\$rc" >> "\$LOG_FILE"
+exit "\$rc"
+EOF
+  chmod +x "$script"
+}
+
+write_watcher_plist() {
+  mkdir -p "$LAUNCH_AGENTS_DIR" "$LOG_DIR"
+  local script="$INSTALL_DIR/watcher.sh"
+  cat > "$PLIST_PATH" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$(xml_escape "$WATCHER_LABEL")</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml_escape "$script")</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>$WATCHER_INTERVAL</integer>
+  <key>StandardOutPath</key>
+  <string>$(xml_escape "$LOG_DIR/cache-watcher.launchd.log")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml_escape "$LOG_DIR/cache-watcher.launchd.err.log")</string>
+</dict>
+</plist>
+EOF
+}
+
+install_watcher() {
+  [[ "$DO_WATCHER" -eq 1 ]] || return
+  ACTIONS+=("install launchd watcher $WATCHER_LABEL every ${WATCHER_INTERVAL}s")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  write_watcher_script
+  write_watcher_plist
+
+  local domain="gui/$(id -u)"
+  run_logged launchctl bootout "$domain" "$PLIST_PATH" || true
+  run_logged launchctl bootstrap "$domain" "$PLIST_PATH" || die "launchd watcher bootstrap failed; see $INSTALL_LOG" 1
+  run_logged launchctl enable "$domain/$WATCHER_LABEL" || true
+  run_logged launchctl kickstart -k "$domain/$WATCHER_LABEL" || true
+  WATCHER_INSTALLED=1
+}
+
+cleanup_legacy_message_cache() {
+  local cache_root root child
+  for cache_root in "$HOME/.wechat-cli/cache" "$HOME/.wx-mcp/cache"; do
+    [[ -d "$cache_root" ]] || continue
+    ACTIONS+=("drop existing cache indexes and non-metadata raw snapshots under $cache_root")
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      continue
+    fi
+    for root in "$cache_root"/*; do
+      [[ -d "$root" ]] || continue
+      rm -f "$root/index.sqlite" "$root/index.sqlite-wal" "$root/index.sqlite-shm"
+      if [[ -d "$root/raw" ]]; then
+        for child in "$root/raw"/*; do
+          [[ -e "$child" ]] || continue
+          case "$(basename "$child")" in
+            contact|session) ;;
+            *) rm -rf "$child" ;;
+          esac
+        done
+      fi
+    done
+  done
+}
+
+doctor() {
+  [[ "$(uname -s)" == "Darwin" ]] && CHECKS+=("os=Darwin") || WARNINGS+=("os is not Darwin")
+  CHECKS+=("arch=$(uname -m)")
+  [[ -d "$SOURCE_DIR" ]] && CHECKS+=("source_dir_exists=true") || WARNINGS+=("source_dir_missing=$SOURCE_DIR")
+  [[ -d "$INSTALL_DIR" ]] && CHECKS+=("install_dir_exists=true") || CHECKS+=("install_dir_exists=false")
+  [[ -x "$INSTALL_DIR/$APP_NAME" ]] && CHECKS+=("installed_wechat_cli=true") || CHECKS+=("installed_wechat_cli=false")
+  [[ -x "$INSTALL_DIR/wxkey" ]] && CHECKS+=("installed_wxkey=true") || CHECKS+=("installed_wxkey=false")
+  [[ -f "$INSTALL_DIR/libWCDB.dylib" ]] && CHECKS+=("installed_libWCDB=true") || CHECKS+=("installed_libWCDB=false")
+  [[ -L "$SHIM_PATH" || -x "$SHIM_PATH" ]] && CHECKS+=("shim_exists=true") || CHECKS+=("shim_exists=false")
+  if have_cmd "$APP_NAME"; then
+    CHECKS+=("wechat_cli_on_path=$(command -v "$APP_NAME")")
+  else
+    CHECKS+=("wechat_cli_on_path=false")
+  fi
+  have_cmd go && CHECKS+=("go=true") || CHECKS+=("go=false")
+  have_cmd claude && CHECKS+=("claude=true") || CHECKS+=("claude=false")
+  have_cmd codex && CHECKS+=("codex=true") || CHECKS+=("codex=false")
+  [[ -f "$PLIST_PATH" ]] && CHECKS+=("watcher_plist=true") || CHECKS+=("watcher_plist=false")
+  if [[ -f "$PLIST_PATH" ]] && have_cmd launchctl; then
+    if launchctl print "gui/$(id -u)/$WATCHER_LABEL" >/dev/null 2>&1; then
+      CHECKS+=("watcher_loaded=true")
+    else
+      CHECKS+=("watcher_loaded=false")
+    fi
+  fi
+  if [[ -x "$INSTALL_DIR/$APP_NAME" ]]; then
+    if run_logged "$INSTALL_DIR/$APP_NAME" cache status; then
+      CHECKS+=("cache_status_ok=true")
+    else
+      CHECKS+=("cache_status_ok=false")
+    fi
+  fi
+}
+
+sudo_keychain_account() {
+  if [[ -n "${WXKEY_ORIG_USER:-}" && "${WXKEY_ORIG_USER:-}" != "root" ]]; then
+    print -r -- "$WXKEY_ORIG_USER"
+  elif [[ -n "${SUDO_USER:-}" && "${SUDO_USER:-}" != "root" ]]; then
+    print -r -- "$SUDO_USER"
+  elif [[ -n "${USER:-}" ]]; then
+    print -r -- "$USER"
+  else
+    id -un 2>/dev/null || print -r -- "$APP_NAME"
+  fi
+}
+
+queue_purge_state_actions() {
+  ACTIONS+=("remove wxkey config file $HOME/.config/wxcli/config.json")
+  ACTIONS+=("remove empty wxkey config dir $HOME/.config/wxcli when no lib remains")
+  ACTIONS+=("remove wechat-cli state dir $HOME/.wechat-cli")
+  ACTIONS+=("remove legacy wx-mcp state dir $HOME/.wx-mcp")
+  ACTIONS+=("remove wechat-cli logs $LOG_DIR")
+  ACTIONS+=("remove legacy wx-mcp logs $HOME/Library/Logs/wx-mcp")
+  ACTIONS+=("delete legacy wxkey sudo Keychain credential for account $(sudo_keychain_account)")
+}
+
+run_purge_state() {
+  rm -f "$HOME/.config/wxcli/config.json"
+  rmdir "$HOME/.config/wxcli" 2>/dev/null || true
+  rm -rf "$HOME/.wechat-cli"
+  rm -rf "$HOME/.wx-mcp"
+  if [[ -x /usr/bin/security ]]; then
+    /usr/bin/security delete-generic-password -a "$(sudo_keychain_account)" -s "r266.wx-mcp.sudo" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$LOG_DIR"
+  rm -rf "$HOME/Library/Logs/wx-mcp"
+}
+
+remove_watcher() {
+  ACTIONS+=("remove watcher $WATCHER_LABEL and legacy $LEGACY_WATCHER_LABEL")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  local domain="gui/$(id -u)"
+  if [[ -f "$PLIST_PATH" ]]; then
+    run_logged launchctl bootout "$domain" "$PLIST_PATH" || true
+    rm -f "$PLIST_PATH"
+  fi
+  if [[ -f "$LEGACY_PLIST_PATH" ]]; then
+    run_logged launchctl bootout "$domain" "$LEGACY_PLIST_PATH" || true
+    rm -f "$LEGACY_PLIST_PATH"
+  fi
+  rm -f "$INSTALL_DIR/watcher.sh"
+  rm -f "$LEGACY_INSTALL_DIR/watcher.sh"
+}
+
+remove_cli_shims() {
+  local shim target
+  local -a paths
+  paths=("$SHIM_PATH" "$BIN_DIR/$LEGACY_APP_NAME" "$HOME/.local/bin/$APP_NAME" "$HOME/.local/bin/$LEGACY_APP_NAME")
+  for shim in "${(@u)paths[@]}"; do
+    [[ -n "$shim" ]] || continue
+    ACTIONS+=("remove CLI command shim $shim if managed by wechat-cli")
+    if [[ "$DRY_RUN" -eq 1 || ( ! -e "$shim" && ! -L "$shim" ) ]]; then
+      continue
+    fi
+    if [[ -L "$shim" ]]; then
+      target="$(readlink "$shim" 2>/dev/null || true)"
+      case "$target" in
+        "$INSTALL_DIR/$APP_NAME"|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"|"$LEGACY_INSTALL_DIR/$APP_NAME"|*/wechat-cli/wechat-cli|*/wx-mcp/wx-mcp)
+          rm -f "$shim"
+          ;;
+      esac
+    elif same_file "$shim" "$INSTALL_DIR/$APP_NAME"; then
+      rm -f "$shim"
+    fi
+  done
+}
+
+stop_installed_processes() {
+  ACTIONS+=("stop running wechat-cli/wx-mcp processes from install dirs")
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  local pid cmd self
+  self="$$"
+  while IFS= read -r line; do
+    pid="${line%% *}"
+    cmd="${line#${pid} }"
+    [[ -n "$pid" && "$pid" != "$self" ]] || continue
+    case "$cmd" in
+      "$INSTALL_DIR/$APP_NAME"*|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"*|"$LEGACY_INSTALL_DIR/$APP_NAME"*)
+        kill "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done < <(ps -axo pid=,command= 2>/dev/null | sed -E 's/^ *//')
+  sleep 0.5
+  while IFS= read -r line; do
+    pid="${line%% *}"
+    cmd="${line#${pid} }"
+    [[ -n "$pid" && "$pid" != "$self" ]] || continue
+    case "$cmd" in
+      "$INSTALL_DIR/$APP_NAME"*|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"*|"$LEGACY_INSTALL_DIR/$APP_NAME"*)
+        kill -KILL "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done < <(ps -axo pid=,command= 2>/dev/null | sed -E 's/^ *//')
+}
+
+clear_state() {
+  remove_watcher
+  queue_purge_state_actions
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+  run_purge_state
+}
+
+uninstall() {
+  remove_watcher
+  stop_installed_processes
+  remove_cli_shims
+  ACTIONS+=("remove install dir $INSTALL_DIR")
+  ACTIONS+=("remove legacy install dir $LEGACY_INSTALL_DIR")
+  if [[ "$PURGE_STATE" -eq 1 ]]; then
+    queue_purge_state_actions
+  fi
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    return
+  fi
+
+  rm -rf "$INSTALL_DIR"
+  rm -rf "$LEGACY_INSTALL_DIR"
+  if [[ "$PURGE_STATE" -eq 1 ]]; then
+    run_purge_state
+  fi
+}
+
+main() {
+  parse_args "$@"
+  INSTALL_DIR="$(expand_path "$INSTALL_DIR")"
+  BIN_DIR="$(expand_path "$BIN_DIR")"
+  SHIM_PATH="$BIN_DIR/$APP_NAME"
+  LOG_DIR="$(expand_path "$LOG_DIR")"
+  INSTALL_LOG="$LOG_DIR/install.log"
+  PLIST_PATH="$LAUNCH_AGENTS_DIR/$WATCHER_LABEL.plist"
+
+  case "$MODE" in
+    install|update|uninstall)
+      validate_install_dir_safety
+      ;;
+  esac
+
+  case "$MODE" in
+    doctor)
+      doctor
+      finish true
+      ;;
+    uninstall)
+      confirm_or_die
+      uninstall
+      mark_dry_run_result
+      finish true
+      ;;
+    clear-state)
+      confirm_or_die
+      clear_state
+      mark_dry_run_result
+      finish true
+      ;;
+    install)
+      confirm_or_die
+      install_components
+      install_cli_shim
+      cleanup_legacy_message_cache
+      run_asr_setup
+      run_bootstrap
+      run_cache_refresh
+      install_watcher
+      mark_dry_run_result
+      finish true
+      ;;
+    update)
+      confirm_or_die
+      update_source
+      install_components
+      install_cli_shim
+      cleanup_legacy_message_cache
+      run_asr_setup
+      run_bootstrap
+      run_cache_refresh
+      install_watcher
+      mark_dry_run_result
+      finish true
+      ;;
+    *)
+      die "unknown mode: $MODE" 2
+      ;;
+  esac
+}
+
+main "$@"

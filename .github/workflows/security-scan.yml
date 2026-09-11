@@ -1,0 +1,14 @@
+name: Public repository safety
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan tracked public tree
+        run: ./scripts/public-repo-scan.sh .
