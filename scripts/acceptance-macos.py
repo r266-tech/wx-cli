@@ -20,7 +20,7 @@ def main():
     def call(tool,args=None,writes=False):
         local=env.copy()
         if writes:local['WECHAT_CLI_STRICT_READ_ONLY']='0'
-        proc=subprocess.run([binary,'call-json',tool],input=json.dumps(args or {}),text=True,capture_output=True,env=local,timeout=180)
+        proc=subprocess.run([binary,'call-json',tool],input=json.dumps(args or {}),text=True,capture_output=True,env=local,timeout=45)
         d=json.loads(proc.stdout)
         if proc.returncode or not d.get('ok'):raise ValueError('tool_failed')
         return d['data']
@@ -38,6 +38,11 @@ def main():
         if not data['loaded'] or data['store']!='keychain':raise ValueError()
         return 1
     record('keychain',keys)
+    # A missing OS authorization is a blocked receipt, not a hanging test.
+    if checks['keychain']['status']!='passed':
+        for name in ('sessions','timeline','context','search','media','digest','archive'):
+            checks[name]={'status':'blocked','warning_codes':['keychain_access_required']}
+        return finish(a,version,checks)
     # Discovery data is never written to disk or stdout.
     sessions=call('sessions',{'limit':10})['sessions']
     if not sessions:raise ValueError('no sessions')
@@ -81,6 +86,9 @@ def main():
         if not result['valid']:raise ValueError('archive invalid')
         return data['succeeded']
     record('archive',archive)
+    return finish(a,version,checks)
+
+def finish(a,version,checks):
     for name in ('install','update','rollback','uninstall'):
         checks[name]={'status':'not_run','warning_codes':['isolated_installer_receipt_required']}
     receipt={'schema_version':1,'passed':all(c['status']=='passed' for c in checks.values()),'version':version['version'],'commit':version['commit'],'artifact_sha256':sha256(a.archive),'platform':'darwin','arch':'arm64','checks':checks}

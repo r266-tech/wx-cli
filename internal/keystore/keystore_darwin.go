@@ -8,16 +8,19 @@ package keystore
 #include <string.h>
 #include <stdlib.h>
 static int save_item(const char*s,const char*a,const void*d,int n){
+ SecKeychainSetUserInteractionAllowed(false);
  SecKeychainItemRef old=NULL; OSStatus st=SecKeychainFindGenericPassword(NULL,(UInt32)strlen(s),s,(UInt32)strlen(a),a,NULL,NULL,&old);
  if(st==errSecSuccess){ st=SecKeychainItemModifyAttributesAndData(old,NULL,(UInt32)n,d); CFRelease(old); return (int)st; }
  if(st!=errSecItemNotFound) return (int)st;
  st=SecKeychainAddGenericPassword(NULL,(UInt32)strlen(s),s,(UInt32)strlen(a),a,(UInt32)n,d,NULL); return (int)st;
 }
 static int load_item(const char*s,const char*a,void**d,UInt32*n){
+ SecKeychainSetUserInteractionAllowed(false);
  return (int)SecKeychainFindGenericPassword(NULL,(UInt32)strlen(s),s,(UInt32)strlen(a),a,n,d,NULL);
 }
 static void free_item(void*d){ if(d) SecKeychainItemFreeContent(NULL,d); }
 static int delete_item(const char*s,const char*a){
+ SecKeychainSetUserInteractionAllowed(false);
  SecKeychainItemRef old=NULL; OSStatus st=SecKeychainFindGenericPassword(NULL,(UInt32)strlen(s),s,(UInt32)strlen(a),a,NULL,NULL,&old); if(st!=errSecSuccess) return (int)st; st=SecKeychainItemDelete(old); CFRelease(old); return (int)st;
 }
 */
