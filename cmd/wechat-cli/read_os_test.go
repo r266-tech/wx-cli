@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/r266-tech/wx-cli/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/config"
 )
 
 func TestReadOSStatusHidesAccountIdentifierUnlessDebug(t *testing.T) {

@@ -22,20 +22,20 @@ Prefer release bootstrap or latest release zip over a source clone.
 Human-friendly macOS:
 
 ```bash
-curl -fsSL https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh | zsh
+curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh
 ```
 
 Agent JSON macOS:
 
 ```bash
-curl -fsSL https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh
+curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | env WECHAT_CLI_INSTALL_JSON=1 zsh
 ```
 
 Windows:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.ps1 | iex"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); irm https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.ps1 | iex"
 ```
 
 Default install is CLI-only. It does not register external agent protocols and
@@ -134,11 +134,11 @@ For old installs that do not have `wechat-cli update` yet, run the release
 bootstrap again:
 
 ```bash
-curl -fsSL https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh | zsh -s -- --update
+curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh -s -- --update
 ```
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); $p=Join-Path $env:TEMP 'wechat-cli-install-release.ps1'; iwr https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.ps1 -OutFile $p -UseBasicParsing; powershell -NoProfile -ExecutionPolicy Bypass -File $p -Update -Json"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Environment]::SetEnvironmentVariable('WECHAT_CLI_INSTALL_JSON','1','Process'); $p=Join-Path $env:TEMP 'wechat-cli-install-release.ps1'; iwr https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.ps1 -OutFile $p -UseBasicParsing; powershell -NoProfile -ExecutionPolicy Bypass -File $p -Update -Json"
 ```
 
 When already inside a freshly extracted release zip, this lower-level command

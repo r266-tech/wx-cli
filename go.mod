@@ -1,4 +1,4 @@
-module github.com/r266-tech/wx-cli
+module github.com/r266-tech/wx-cli/v2
 
 go 1.26.5
 

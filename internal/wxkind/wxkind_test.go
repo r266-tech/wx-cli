@@ -82,7 +82,7 @@ func TestClassifyUsername(t *testing.T) {
 	cases := []struct {
 		u, want string
 	}{
-		{"12345678901@chatroom", "group"},
+		{"fixture_group@chatroom", "group"},
 		{"gh_examplebiz", "official_account"},
 		{"99999999999999@openim", "corp_im"},
 		{"abc@weclaw", "clawbot"},

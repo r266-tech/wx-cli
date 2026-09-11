@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-REPO="${WECHAT_CLI_REPO:-https://github.com/r266-tech/wx-cli-releases}"
+REPO="${WECHAT_CLI_RELEASE_REPO:-${WECHAT_CLI_REPO:-https://github.com/r266-tech/wechat-cli-releases}}"
 TAG="${WECHAT_CLI_RELEASE_TAG:-latest}"
 ASSET="${WECHAT_CLI_RELEASE_ASSET:-wechat-cli-latest-darwin-arm64.zip}"
 KEEP_DOWNLOAD="${WECHAT_CLI_KEEP_DOWNLOAD:-0}"
@@ -22,7 +22,7 @@ esac
 usage() {
   cat <<'EOF'
 Usage:
-  curl -fsSL https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh | zsh
+  curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [--with-asr] [installer args...]
   ./scripts/install-release.sh --all [--json]   # install + first key bootstrap
 
@@ -224,6 +224,14 @@ main() {
   local slug base url tmp zip sha extract install_script install_dir fallback
   slug="$(repo_slug "$REPO")"
   base="$(repo_url "$REPO")"
+  have_cmd python3 || fail "python3 is required for manifest validation."
+  if [[ "$TAG" == "latest" ]]; then
+    TAG="$(fetch_text "https://api.github.com/repos/$slug/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')" || fail "release_endpoint_unavailable"
+  fi
+  [[ "$TAG" == v[0-9]* ]] || fail "invalid release tag"
+  if [[ "$ASSET" == "wechat-cli-latest-darwin-arm64.zip" ]]; then
+    ASSET="wechat-cli-${TAG}-darwin-arm64.zip"
+  fi
   url="$(asset_url "$base" "$slug" "$TAG" "$ASSET")"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/wechat-cli-install.XXXXXX")"
   if [[ "$KEEP_DOWNLOAD" != "1" ]]; then
@@ -236,7 +244,7 @@ main() {
   zip="$tmp/$ASSET"
   sha="$tmp/$ASSET.sha256"
   extract="$tmp/extract"
-  mkdir -p "$extract"
+
 
   say "Downloading wechat-cli release: $url"
   if ! download_file "$url" "$zip"; then
@@ -260,9 +268,52 @@ main() {
     fi
   fi
 
-  unzip -q "$zip" -d "$extract"
+  # Embedded dependency-free verifier runs before any installer from the zip.
+  python3 - "$zip" "$extract" "${TAG#v}" <<'VERIFY_RELEASE_PY'
+"""Standalone bootstrap verifier. Kept dependency-free for embedding in installers."""
+import hashlib
+import json
+import re
+import stat
+import sys
+import zipfile
+from pathlib import Path, PurePosixPath
+
+
+def verify_and_extract(archive, destination, expected_version):
+    dest=Path(destination)
+    with zipfile.ZipFile(archive) as z:
+        infos=z.infolist()
+        if len(infos)>2000 or sum(i.file_size for i in infos)>256*1024*1024:raise ValueError('release archive budget exceeded')
+        names=set();roots=set()
+        for i in infos:
+            p=PurePosixPath(i.filename)
+            if p.is_absolute() or '..' in p.parts or '\\' in i.filename or ':' in i.filename or stat.S_ISLNK(i.external_attr>>16):raise ValueError('unsafe release path')
+            if i.filename in names:raise ValueError('duplicate release path')
+            names.add(i.filename);roots.add(p.parts[0])
+        if len(roots)!=1:raise ValueError('expected one release root')
+        prefix=roots.pop()+'/'
+        d=json.loads(z.read(prefix+'release-manifest.json'))
+        if d.get('schema_version')!=2 or d.get('source_repository')!='r266-tech/wx-cli':raise ValueError('manifest schema/source mismatch')
+        if d.get('version')!=expected_version or d.get('platform_arch')!='darwin-arm64':raise ValueError('release version/platform mismatch')
+        if not re.fullmatch('[0-9a-f]{40}',d.get('commit','')):raise ValueError('invalid source commit')
+        if d.get('channel')!='stable' or d.get('signing_mode')!='developer_id' or d.get('notarization_status')!='accepted':raise ValueError('release is not a verified stable package')
+        files={i.filename[len(prefix):] for i in infos if not i.is_dir()}-{'release-manifest.json'}
+        if files!=set(d['artifacts']):raise ValueError('manifest file set mismatch')
+        for name,expected in d['artifacts'].items():
+            raw=z.read(prefix+name)
+            if len(raw)!=expected['bytes'] or hashlib.sha256(raw).hexdigest()!=expected['sha256']:raise ValueError('manifest artifact hash mismatch')
+        if dest.exists():raise ValueError('destination must be new')
+        dest.mkdir(parents=True,mode=0o700);z.extractall(dest)
+        for i in infos:
+            if not i.is_dir():(dest/i.filename).chmod(0o755 if (i.external_attr>>16)&0o111 else 0o644)
+    return dest/prefix
+
+if __name__=='__main__':print(verify_and_extract(*sys.argv[1:]))
+VERIFY_RELEASE_PY
+  [[ "$?" -eq 0 ]] || fail "release manifest verification failed"
   install_script="$(find "$extract" -maxdepth 3 -type f -name install.sh | head -n 1)"
-  [[ -n "$install_script" ]] || fail "install.sh not found inside release zip."
+  [[ -n "$install_script" ]] || fail "install.sh not found inside release zip"
   install_dir="${install_script:h}"
 
   say "Running bundled installer from $install_dir"

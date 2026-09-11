@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/r266-tech/wx-cli/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
 type chatCandidate struct {

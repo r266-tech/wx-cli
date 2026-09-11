@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/r266-tech/wx-cli/internal/config"
-	"github.com/r266-tech/wx-cli/internal/keystore"
+	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/keystore"
 )
 
 func (s *server) toolKeychainStatus(a map[string]any) (any, error) {
@@ -48,7 +48,7 @@ func (s *server) toolKeychainMigrate(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if cfg.KeyStore == "keychain" && len(cfg.Keys) == 0 {
+	if cfg.KeyStore == "keychain" {
 		return map[string]any{"status": "already_migrated", "store": "keychain"}, nil
 	}
 	if len(cfg.Keys) == 0 {

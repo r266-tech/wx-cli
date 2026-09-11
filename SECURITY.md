@@ -7,8 +7,8 @@ user running it. It does not require or use a remote service.
 
 The following files are intentionally local and must not be committed or shared:
 
-- `~/.config/wxcli/config.json`: contains the wxid, DB root, and DB key material.
-- `~/.wechat-cli/cache/`: contains plaintext snapshot DBs and `index.sqlite`.
+- `~/.config/wxcli/config.json`: contains account and DB references; legacy schema 2 may contain secrets. Schema 3 keeps runtime secrets in Keychain.
+- `~/.wechat-cli/cache/`: contains metadata indexes; explicit plaintext archives are kept separately.
 - macOS wxkey sudo credential in Keychain: contains the user's stored sudo password for unattended no-SIP key refresh.
 - `dist/`, `wechat-cli`, `wxkey`, and local `libWCDB.dylib` build artifacts.
 

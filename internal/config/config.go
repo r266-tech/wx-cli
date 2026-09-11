@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/r266-tech/wx-cli/internal/keystore"
+	"github.com/r266-tech/wx-cli/v2/internal/keystore"
 )
 
 // Config is wechat-cli's persistent key map. By default it intentionally stays
@@ -39,7 +39,7 @@ func (c *Config) Ready() bool {
 	if c == nil {
 		return false
 	}
-	return len(c.Keys) > 0 || c.KeyStore == "keychain"
+	return len(c.Keys) > 0
 }
 
 func dir() (string, error) {
@@ -84,15 +84,8 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	applyEnvOverrides(&c)
-	if len(c.Keys) == 0 && c.KeyStore == "keychain" && c.DBRoot != "" && c.Wxid != "" {
-		if record, keyErr := keystore.Load(c.DBRoot, c.Wxid); keyErr == nil {
-			c.Keys = record.Keys
-			c.ImageKey = record.ImageKey
-			c.ImageXORKey = record.ImageXORKey
-			if record.KeyEpoch > c.KeyEpoch {
-				c.KeyEpoch = record.KeyEpoch
-			}
-		}
+	if err := hydrateRuntimeKeys(&c); err != nil {
+		return nil, err
 	}
 	return &c, nil
 }
@@ -106,14 +99,18 @@ func MigrateToKeychain(c *Config) (*Config, error) {
 		return nil, errors.New("legacy config does not contain a complete runtime key map")
 	}
 	record := keystore.Record{SchemaVersion: 1, WxID: c.Wxid, DBRoot: c.DBRoot, Keys: c.Keys, ImageKey: c.ImageKey, ImageXORKey: c.ImageXORKey, KeyEpoch: c.KeyEpoch}
-	if err := keystore.Save(record); err != nil {
+	if err := runtimeKeySave(record); err != nil {
 		return nil, err
 	}
-	if _, err := keystore.Load(c.DBRoot, c.Wxid); err != nil {
+	if _, err := runtimeKeyLoad(c.DBRoot, c.Wxid); err != nil {
 		return nil, err
 	}
 	copy := *c
 	copy.Keys = nil
+	copy.ImageKey = ""
+	copy.ImageXORKey = nil
+	copy.Key = ""
+	copy.KeyPID = 0
 	copy.KeyStore = "keychain"
 	copy.KeyStoreRef = keystore.Account(c.DBRoot, c.Wxid)
 	copy.SchemaVersion = 3
@@ -147,6 +144,9 @@ func Update(mutate func(*Config) error) error {
 			return err
 		}
 		applyEnvOverrides(cfg)
+		if err := hydrateRuntimeKeys(cfg); err != nil {
+			return err
+		}
 		if err := mutate(cfg); err != nil {
 			return err
 		}
@@ -231,7 +231,23 @@ func openConfigWriteRoot(p string) (*os.Root, string, error) {
 }
 
 func saveConfigToRoot(root *os.Root, base string, c *Config) error {
-	b, err := json.MarshalIndent(c, "", "  ")
+	persisted := *c
+	if c.KeyStore == "keychain" {
+		if c.KeyStoreRef != keystore.Account(c.DBRoot, c.Wxid) {
+			return errors.New("keychain reference mismatch")
+		}
+		if len(c.Keys) > 0 {
+			if err := runtimeKeySave(keystore.Record{SchemaVersion: 1, WxID: c.Wxid, DBRoot: c.DBRoot, Keys: c.Keys, ImageKey: c.ImageKey, ImageXORKey: c.ImageXORKey, KeyEpoch: c.KeyEpoch}); err != nil {
+				return errors.New("keychain update failed")
+			}
+		}
+		persisted.Keys = nil
+		persisted.ImageKey = ""
+		persisted.ImageXORKey = nil
+		persisted.Key = ""
+		persisted.KeyPID = 0
+	}
+	b, err := json.MarshalIndent(&persisted, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -498,4 +514,31 @@ func lastIndex(s, sep string) int {
 		}
 	}
 	return -1
+}
+
+var runtimeKeyLoad = keystore.Load
+var runtimeKeySave = keystore.Save
+
+func hydrateRuntimeKeys(c *Config) error {
+	if c.KeyStore != "keychain" {
+		return nil
+	}
+	if c.DBRoot == "" || c.Wxid == "" || c.KeyStoreRef != keystore.Account(c.DBRoot, c.Wxid) {
+		return errors.New("keychain reference mismatch")
+	}
+	record, err := runtimeKeyLoad(c.DBRoot, c.Wxid)
+	if err != nil {
+		return errors.New("keychain runtime keys unavailable")
+	}
+	if record.WxID != c.Wxid || record.DBRoot != c.DBRoot || record.SchemaVersion != 1 || len(record.Keys) == 0 {
+		return errors.New("keychain record mismatch")
+	}
+	if record.KeyEpoch < c.KeyEpoch {
+		return errors.New("keychain epoch rollback rejected")
+	}
+	c.Keys = record.Keys
+	c.ImageKey = record.ImageKey
+	c.ImageXORKey = record.ImageXORKey
+	c.KeyEpoch = record.KeyEpoch
+	return nil
 }

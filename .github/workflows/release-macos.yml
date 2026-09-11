@@ -1,114 +1,65 @@
 name: Release macOS
-
 on:
   push:
     tags: ['v*.*.*']
-
+  workflow_dispatch:
 permissions:
   contents: read
-
 concurrency:
-  group: release-macos-${{ github.ref_name }}
+  group: release-macos-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
   package:
     runs-on: macos-14
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
-      - name: Test source at release tag
+      - run: python3 scripts/public_repo_scan.py .
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Build locked inputs
+        run: python3 scripts/prepare-release-inputs.py
+      - name: Build candidate
+        id: identity
         run: |
-          test "$(git describe --tags --exact-match HEAD)" = "$GITHUB_REF_NAME"
-          go test ./...
-          go vet ./...
-          go test -race ./...
-      - name: Resolve fixed wxkey source
-        env:
-          WXKEY_TAG: v1.4.8
-          WXKEY_COMMIT: 9b70eec
-        run: |
-          git clone --depth 1 --branch "$WXKEY_TAG" https://github.com/r266-tech/wxkey.git "$RUNNER_TEMP/wxkey"
-          test "$(git -C "$RUNNER_TEMP/wxkey" rev-parse HEAD | cut -c1-7)" = "$WXKEY_COMMIT"
-          echo "WECHAT_CLI_WXKEY_COMMIT=$(git -C "$RUNNER_TEMP/wxkey" rev-parse HEAD)" >> "$GITHUB_ENV"
-          echo "WXKEY_SRC=$RUNNER_TEMP/wxkey" >> "$GITHUB_ENV"
-      - name: Obtain pinned WCDB dylib
-        env:
-          WCDB_URL: ${{ vars.WECHAT_CLI_WCDB_DYLIB_URL }}
-          WCDB_SHA256: ${{ vars.WECHAT_CLI_WCDB_DYLIB_SHA256 }}
-        run: |
-          test -n "$WCDB_URL"
-          test -n "$WCDB_SHA256"
-          curl -fsSL --retry 3 "$WCDB_URL" -o "$RUNNER_TEMP/libWCDB.dylib"
-          echo "$WCDB_SHA256  $RUNNER_TEMP/libWCDB.dylib" | shasum -a 256 -c -
-          echo "WECHAT_CLI_WCDB_DYLIB=$RUNNER_TEMP/libWCDB.dylib" >> "$GITHUB_ENV"
-          echo "WECHAT_CLI_WCDB_SOURCE=$WCDB_URL" >> "$GITHUB_ENV"
-          echo "WECHAT_CLI_WCDB_SHA256=$WCDB_SHA256" >> "$GITHUB_ENV"
-      - name: Package and validate
-        env:
-          WECHAT_CLI_WXKEY_VERSION: v1.4.8
-          WECHAT_CLI_WCDB_VERSION: pinned
-          WECHAT_CLI_SIGNING_MODE: adhoc
-          WECHAT_CLI_NOTARIZATION_STATUS: not_configured
-          WECHAT_CLI_SOURCE_REPOSITORY: r266-tech/wx-cli
-        run: |
-          export SOURCE_DATE_EPOCH="$(date +%s)"
-          version="${GITHUB_REF_NAME#v}"
-          ./scripts/package.sh "$version"
-          ./scripts/public-repo-scan.sh .
-          python3 - <<'PY'
-          import json, pathlib
-          manifest = next(pathlib.Path('dist').glob('wechat-cli-v*-darwin-arm64/release-manifest.json'))
-          data = json.loads(manifest.read_text())
-          required = ['source_repository','commit','wxkey_commit','wcdb_source','wcdb_sha256','signing_mode','notarization_status']
-          missing = [key for key in required if not data.get(key)]
-          if missing:
-              raise SystemExit('manifest missing: ' + ','.join(missing))
-          PY
-      - uses: actions/upload-artifact@v4
+          version=$(go run ./cmd/wechat-cli --version | python3 -c 'import json,sys;print(json.load(sys.stdin)["data"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          scripts/package.sh "$version" --candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: macos-release-${{ github.ref_name }}
-          path: |
-            dist/wechat-cli-v*-darwin-arm64.zip
-            dist/wechat-cli-v*-darwin-arm64.zip.sha256
-            dist/wechat-cli-latest-darwin-arm64.zip
-            dist/wechat-cli-latest-darwin-arm64.zip.sha256
-            dist/install-release.sh
-            dist/install-release.sh.sha256
-            dist/install-release.ps1
-            dist/install-release.ps1.sha256
-            dist/wechat-cli-v*-darwin-arm64/release-manifest.json
-
-  publish:
+          name: macos-candidate
+          path: dist/wechat-cli-v*-darwin-arm64.zip*
+          if-no-files-found: error
+  draft:
     needs: package
+    # No personal access token fallback. An absent App blocks publication only.
+    if: vars.WECHAT_CLI_RELEASE_APP_ID != ''
+    environment: release
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: macos-release-${{ github.ref_name }}
+          name: macos-candidate
           path: assets
-      - name: Mint release repository token
-        id: app-token
-        uses: actions/create-github-app-token@v1
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        id: app
         with:
-          app-id: ${{ secrets.WECHAT_CLI_RELEASE_APP_ID }}
+          app-id: ${{ vars.WECHAT_CLI_RELEASE_APP_ID }}
           private-key: ${{ secrets.WECHAT_CLI_RELEASE_APP_PRIVATE_KEY }}
           owner: r266-tech
           repositories: wechat-cli-releases
-      - name: Create and publish draft release
+          permission-contents: write
+      - name: Upload and read back draft bytes
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          test -n "$GH_TOKEN"
-          version="${RELEASE_TAG#v}"
-          cd assets/dist
-          gh release create "$RELEASE_TAG" "wechat-cli-v$version-darwin-arm64.zip" "wechat-cli-v$version-darwin-arm64.zip.sha256" wechat-cli-latest-darwin-arm64.zip wechat-cli-latest-darwin-arm64.zip.sha256 install-release.sh install-release.sh.sha256 install-release.ps1 install-release.ps1.sha256 "wechat-cli-v$version-darwin-arm64/release-manifest.json" --repo r266-tech/wechat-cli-releases --draft --title "wechat-cli v$version" --notes "Automated macOS release from r266-tech/wx-cli tag $RELEASE_TAG"
-          gh release view "$RELEASE_TAG" --repo r266-tech/wechat-cli-releases --json assets --jq '.assets | length' | grep -q '^9$'
-          gh release edit "$RELEASE_TAG" --repo r266-tech/wechat-cli-releases --draft=false
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          RELEASE_VERSION: ${{ needs.package.outputs.version }}
+        run: python3 scripts/publish-release.py --directory assets --version "$RELEASE_VERSION"

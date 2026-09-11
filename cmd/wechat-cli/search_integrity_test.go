@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/r266-tech/wx-cli/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
 func TestEscapeSQLLikeLiteralTreatsWildcardsLiterally(t *testing.T) {

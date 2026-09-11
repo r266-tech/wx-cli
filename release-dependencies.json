@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "wxkey": {
+    "repository": "r266-tech/wxkey",
+    "tag": "v1.4.8",
+    "commit_sha": "9b70eecdde47a7172b19465c3f977c86b6050e8a"
+  },
+  "wcdb": {
+    "repository": "Tencent/wcdb",
+    "version": "2.1.16",
+    "commit_sha": "df808591b9f9a9ab42156006819c3550d5af13a3",
+    "source_url": "https://github.com/Tencent/wcdb/releases/download/v2.1.16/wcdb-2.1.16.zip",
+    "archive_sha256": "260845053c5dedc4578570203a5ba235c3be1e74a671c2fc1aeb12c988dd5346",
+    "build_platform": "darwin-arm64",
+    "build_flags": [
+      "-DCMAKE_BUILD_TYPE=Release",
+      "-DCMAKE_OSX_ARCHITECTURES=arm64",
+      "-DCMAKE_OSX_DEPLOYMENT_TARGET=12.0",
+      "-DBUILD_SHARED_LIBS=ON",
+      "-DWCDB_ZSTD=OFF",
+      "-DSKIP_WCONAN=ON"
+    ]
+  }
+}

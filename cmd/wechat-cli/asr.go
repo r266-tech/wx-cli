@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/r266-tech/wx-cli/internal/safefile"
+	"github.com/r266-tech/wx-cli/v2/internal/safefile"
 )
 
 type asrSetupOptions struct {

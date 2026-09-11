@@ -19,10 +19,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/r266-tech/wx-cli/internal/config"
-	"github.com/r266-tech/wx-cli/internal/safefile"
-	"github.com/r266-tech/wx-cli/internal/wcdb"
-	"github.com/r266-tech/wx-cli/internal/wxkind"
+	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/safefile"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wxkind"
 )
 
 var errCacheMissing = errors.New("cache index missing; run cache_refresh first")

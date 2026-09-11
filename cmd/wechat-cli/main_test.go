@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/r266-tech/wx-cli/internal/config"
-	"github.com/r266-tech/wx-cli/internal/wcdb"
-	"github.com/r266-tech/wx-cli/internal/wxkey"
-	"github.com/r266-tech/wx-cli/internal/wxparse"
+	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wxkey"
+	"github.com/r266-tech/wx-cli/v2/internal/wxparse"
 )
 
 func captureStdout(t *testing.T, fn func()) []byte {
@@ -317,19 +317,19 @@ func TestReadEventsCursorAndJSONLHelpers(t *testing.T) {
 }
 
 func TestResolveLooseSenderSupportsMeAlias(t *testing.T) {
-	srv := &server{cfg: &config.Config{Wxid: "wxid_fixture_account_001"}}
+	srv := &server{cfg: &config.Config{Wxid: "wxid_fixture001_abcd"}}
 	got, err := srv.resolveLooseSenderArg(map[string]any{"sender": "me"})
 	if err != nil {
 		t.Fatalf("sender=me error: %v", err)
 	}
-	if got != "wxid_fixture_account_001" {
+	if got != "wxid_fixture001" {
 		t.Fatalf("sender=me resolved %q", got)
 	}
 	got, err = srv.resolveLooseSenderArg(map[string]any{"from_me": true})
 	if err != nil {
 		t.Fatalf("from_me error: %v", err)
 	}
-	if got != "wxid_fixture_account_001" {
+	if got != "wxid_fixture001" {
 		t.Fatalf("from_me resolved %q", got)
 	}
 }
@@ -824,8 +824,8 @@ func TestWindowsReleaseUpdateScriptPreservesInstallDir(t *testing.T) {
 
 func TestReleaseBootstrapURLsUseLatestReleaseAssets(t *testing.T) {
 	want := map[string]string{
-		"shell":      "https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh",
-		"powershell": "https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.ps1",
+		"shell":      "https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh",
+		"powershell": "https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.ps1",
 	}
 	got := map[string]string{
 		"shell":      releaseInstallShellURL,
@@ -1016,7 +1016,7 @@ func copyRow(r wcdb.Row) wcdb.Row {
 func TestAgentMessagesFlattensImagesAndQuotes(t *testing.T) {
 	rows := []wcdb.Row{
 		{
-			"talker":              "45428231044@chatroom",
+			"talker":              "fixture_room@chatroom",
 			"local_id":            int64(682),
 			"server_id_str":       "2369251559671996886",
 			"create_time":         int64(1779433702),
@@ -1071,7 +1071,7 @@ func TestAgentMessagesFlattensImagesAndQuotes(t *testing.T) {
 		t.Fatalf("agent view leaked media_read_hints: %#v", got[0])
 	}
 	id, ok := got[0]["id"].(map[string]any)
-	if !ok || id["local_id"] != int64(682) || id["server_id_str"] != "2369251559671996886" || id["talker"] != "45428231044@chatroom" {
+	if !ok || id["local_id"] != int64(682) || id["server_id_str"] != "2369251559671996886" || id["talker"] != "fixture_room@chatroom" {
 		t.Fatalf("id = %#v, want stable local/server ids", got[0]["id"])
 	}
 	if got[0]["sender_wxid"] != "wxid_v" || got[0]["is_from_me"] != true {
@@ -1779,11 +1779,11 @@ func TestAgentMessagesStructuresCommonNonTextPayloads(t *testing.T) {
 		},
 		{
 			"kind_name":       "card",
-			"content_summary": "[名片] A-返利小秘书",
+			"content_summary": "[名片] Fixture Card",
 			"message_content_parsed": map[string]any{
-				"username":         "wxid_apxmfod6s63121",
-				"nickname":         "A-返利小秘书",
-				"alias":            "GJZ9990",
+				"username":         "wxid_fixture_card",
+				"nickname":         "Fixture Card",
+				"alias":            "fixture-alias",
 				"big_head_img_url": "https://wx.qlogo.cn/mmhead/ver_1/sample/0",
 			},
 		},
@@ -1837,7 +1837,7 @@ func TestAgentMessagesStructuresCommonNonTextPayloads(t *testing.T) {
 		t.Fatalf("location payload = %#v", loc)
 	}
 	card := got[6]["card"].(map[string]any)
-	if card["username"] != "wxid_apxmfod6s63121" || card["display_name"] != "A-返利小秘书" || card["alias"] != "GJZ9990" || card["avatar_url"] != "https://wx.qlogo.cn/mmhead/ver_1/sample/0" {
+	if card["username"] != "wxid_fixture_card" || card["display_name"] != "Fixture Card" || card["alias"] != "fixture-alias" || card["avatar_url"] != "https://wx.qlogo.cn/mmhead/ver_1/sample/0" {
 		t.Fatalf("card payload = %#v", card)
 	}
 	music := got[7]["music"].(map[string]any)
@@ -3231,7 +3231,7 @@ func TestQuoteImageMediaReadHintsExposeDirectReadablePath(t *testing.T) {
 		"type":        3,
 		"createtime":  int64(1779433050),
 		"displayname": "V",
-		"fromusr":     "45428231044@chatroom",
+		"fromusr":     "fixture_room@chatroom",
 		"content_parsed": map[string]any{
 			"md5":           contentMD5,
 			"aeskey":        "refer-aeskey",
@@ -3241,7 +3241,7 @@ func TestQuoteImageMediaReadHintsExposeDirectReadablePath(t *testing.T) {
 		},
 	}
 	messages := []wcdb.Row{{
-		"talker":      "45428231044@chatroom",
+		"talker":      "fixture_room@chatroom",
 		"local_id":    int64(641),
 		"create_time": int64(1779433700),
 		"base_kind":   int64(49),

@@ -1,14 +1,11 @@
 name: Public repository safety
-
 on: [push, pull_request]
-
 permissions:
   contents: read
-
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - name: Scan tracked public tree
-        run: ./scripts/public-repo-scan.sh .
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: python3 scripts/public_repo_scan.py .
+      - run: python3 -m unittest discover -s scripts -p 'test_*.py'

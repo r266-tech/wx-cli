@@ -6,10 +6,12 @@ import (
 	"strings"
 )
 
+var sourceCommit = "development"
+
 const (
 	appName       = "wechat-cli"
 	legacyAppName = "wx-mcp"
-	appVersion    = "2.0.0"
+	appVersion    = "2.0.1-rc.1"
 
 	stateDirName       = ".wechat-cli"
 	legacyStateDirName = ".wx-mcp"

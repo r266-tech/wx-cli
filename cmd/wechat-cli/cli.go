@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/r266-tech/wx-cli/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
 type cliOptions struct {
@@ -129,6 +129,7 @@ func maybeRunCLI(args []string) bool {
 		writeCLISuccess("version", "version", map[string]any{
 			"name":    appName,
 			"version": appVersion,
+			"commit":  sourceCommit,
 		}, opts)
 		return true
 	case "tools", "list-tools", "list_tools":

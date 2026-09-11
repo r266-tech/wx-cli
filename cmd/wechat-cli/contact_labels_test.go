@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/r266-tech/wx-cli/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
 func appendTestProtoVarintField(dst []byte, field, value uint64) []byte {

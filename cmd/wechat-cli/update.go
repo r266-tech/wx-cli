@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	releaseInstallShellURL      = "https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh"
-	releaseInstallPowerShellURL = "https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.ps1"
+	releaseInstallShellURL      = "https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh"
+	releaseInstallPowerShellURL = "https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.ps1"
 )
 
 type updateOptions struct {
@@ -79,7 +79,7 @@ func parseUpdateArgs(args []string) (updateOptions, error) {
 		}
 	}
 	if opts.Repo == "" && os.Getenv("WECHAT_CLI_REPO") == "" && os.Getenv("WX_MCP_REPO") == "" {
-		opts.Repo = "https://github.com/r266-tech/wx-cli-releases"
+		opts.Repo = "https://github.com/r266-tech/wechat-cli-releases"
 	}
 	return opts, nil
 }

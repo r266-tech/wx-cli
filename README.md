@@ -21,7 +21,7 @@
 ### macOS
 
 ```bash
-curl -fsSL https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.sh | zsh
+curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh
 ~/.local/share/wechat-cli/wxkey bootstrap
 wechat-cli agent --pretty
 ```
@@ -34,7 +34,7 @@ wechat-cli agent --pretty
 ### Windows
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wx-cli-releases/releases/latest/download/install-release.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.ps1 | iex"
 wechat-cli cache refresh --force
 wechat-cli agent --pretty
 ```
@@ -276,3 +276,15 @@ go test -race ./...
 发布包必须从与 `appVersion` 一致的干净 tag 构建；打包脚本会校验版本、架构、WCDB 导出与产物身份。
 
 许可证与第三方组件见 [LICENSE](LICENSE) 与 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+
+## Source and release governance
+
+Canonical source: `r266-tech/wx-cli`. Release assets: `r266-tech/wechat-cli-releases`.
+Go v2 module path: `github.com/r266-tech/wx-cli/v2` (semantic import versioning).
+The CLI remains `wechat-cli`; existing installation, configuration, state and
+Keychain service paths are retained. The old Go module import path is not supported.
+
+The initial source tag does not constitute an accepted v2 release. A candidate
+must pass the release gates in `docs/RELEASE_GOVERNANCE.md` before becoming stable.
+Candidate builds are never installed by the default release bootstrap.

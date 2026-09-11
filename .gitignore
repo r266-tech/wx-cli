@@ -8,3 +8,8 @@
 /*.dll
 *.log
 .DS_Store
+
+/.build/
+__pycache__/
+*.pyc
+/receipts/

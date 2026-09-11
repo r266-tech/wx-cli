@@ -323,6 +323,8 @@ sign_macho_ad_hoc() {
   local macho_path="$1"
   [[ "${OSTYPE:-}" == darwin* ]] || return 0
   [[ -x /usr/bin/codesign ]] || return 0
+  # Preserve valid signatures and bytes, including Developer ID signatures.
+  if /usr/bin/codesign --verify --strict "$macho_path" >/dev/null 2>&1; then return 0; fi
   run_logged /usr/bin/codesign --force --sign - "$macho_path" || return 1
 }
 
@@ -367,7 +369,7 @@ build_install_go_binary() {
   base="$(basename "$dest")"
   mkdir -p "$dir"
   tmp="$(mktemp "$dir/.${base}.tmp.XXXXXX")" || die "create temporary build path for $label failed" 1
-  if ! run_logged_in "$src_dir" env CGO_ENABLED=0 go build -o "$tmp" "$pkg"; then
+  if ! run_logged_in "$src_dir" env CGO_ENABLED=1 go build -o "$tmp" "$pkg"; then
     rm -f "$tmp"
     die "build $label failed; see $INSTALL_LOG" 1
   fi
@@ -667,6 +669,9 @@ install_components() {
   mkdir -p "$INSTALL_DIR"
   print -r -- "name=$APP_NAME" > "$INSTALL_DIR/$INSTALL_MARKER" || die "write install marker failed" 1
 
+  if [[ -f "$SOURCE_DIR/release-manifest.json" ]]; then
+    atomic_install_path "$SOURCE_DIR/release-manifest.json" "$INSTALL_DIR/release-manifest.json" 644 0 "release manifest"
+  fi
   if [[ "$CLI_MODE" == "build" ]]; then
     build_install_go_binary "$CLI_SOURCE" ./cmd/wechat-cli "$INSTALL_DIR/$APP_NAME" "$APP_NAME"
   else

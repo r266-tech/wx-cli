@@ -15,7 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = "https://github.com/r266-tech/wx-cli-releases" }
+if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = "https://github.com/r266-tech/wechat-cli-releases" }
 if ([string]::IsNullOrWhiteSpace($Tag)) { $Tag = "latest" }
 if ([string]::IsNullOrWhiteSpace($Asset)) { $Asset = "wechat-cli-latest-windows-amd64.zip" }
 if ($env:WECHAT_CLI_INSTALL_JSON -eq "1") { $Json = $true }

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/r266-tech/wx-cli/internal/config"
-	"github.com/r266-tech/wx-cli/internal/wcdb"
-	"github.com/r266-tech/wx-cli/internal/wxkey"
+	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wxkey"
 )
 
 func (s *server) toolReadOS(a map[string]any) (any, error) {
@@ -72,9 +72,12 @@ func (s *server) readOSDoctor() map[string]any {
 			"arch": runtime.GOARCH,
 		},
 		"runtime": map[string]any{
-			"app_name":         appName,
-			"app_version":      appVersion,
-			"strict_read_only": strictReadOnlyMode(),
+			"app_name":           appName,
+			"source_commit":      sourceCommit,
+			"source_repository":  "r266-tech/wx-cli",
+			"release_repository": "r266-tech/wechat-cli-releases",
+			"app_version":        appVersion,
+			"strict_read_only":   strictReadOnlyMode(),
 		},
 		"status": status,
 	}

@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/r266-tech/wx-cli/internal/wcdb"
-	"github.com/r266-tech/wx-cli/internal/wxkind"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wxkind"
 )
 
 type contextAnchorRef struct {

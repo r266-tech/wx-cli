@@ -214,7 +214,7 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	if err := os.MkdirAll(filepath.Join(folder, "sources"), 0o700); err != nil {
 		return nil, err
 	}
-	stamp := time.Now().Format("20060102-150405")
+	stamp := time.Now().Format("20060102-150405.000000000")
 	jsonPath := filepath.Join(folder, "sources", stamp+".json")
 	mdPath := filepath.Join(folder, "sources", stamp+".md")
 	stats := digestStats(messages)

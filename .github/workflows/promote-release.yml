@@ -1,0 +1,35 @@
+name: Promote verified release
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing immutable draft tag without v
+        required: true
+      source_commit:
+        description: Full source commit tested locally
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: promote-release
+  cancel-in-progress: false
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        id: app
+        with:
+          app-id: ${{ vars.WECHAT_CLI_RELEASE_APP_ID }}
+          private-key: ${{ secrets.WECHAT_CLI_RELEASE_APP_PRIVATE_KEY }}
+          owner: r266-tech
+          repositories: wechat-cli-releases
+          permission-contents: write
+      - name: Verify exact draft, notarization and acceptance before promotion
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: python3 scripts/publish-release.py --promote --version "$RELEASE_VERSION" --commit "$SOURCE_COMMIT"

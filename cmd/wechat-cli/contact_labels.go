@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/r266-tech/wx-cli/internal/wcdb"
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
 // WeChat 4.x ContactInfo stores a comma-delimited list of contact label IDs in
