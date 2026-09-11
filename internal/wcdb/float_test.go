@@ -54,3 +54,29 @@ func TestQueryReadsRealColumn(t *testing.T) {
 		t.Fatalf("REAL value = %#v (%T), want float64(1.5)", rows[0]["x"], rows[0]["x"])
 	}
 }
+
+func TestBindRealAndEmptyBlobPreserveTypes(t *testing.T) {
+	oldDouble, oldBlob := sqlite3_bind_double, sqlite3_bind_zeroblob
+	t.Cleanup(func() { sqlite3_bind_double, sqlite3_bind_zeroblob = oldDouble, oldBlob })
+	realCalls, blobCalls := 0, 0
+	sqlite3_bind_double = func(_ uintptr, _ int32, v float64) int32 {
+		if v != 1.5 {
+			t.Fatal("real changed")
+		}
+		realCalls++
+		return SQLITE_OK
+	}
+	sqlite3_bind_zeroblob = func(_ uintptr, _ int32, n int32) int32 {
+		if n != 0 {
+			t.Fatal("empty blob changed")
+		}
+		blobCalls++
+		return SQLITE_OK
+	}
+	if err := bindArgs(1, []any{float64(1.5), []byte{}}); err != nil {
+		t.Fatal(err)
+	}
+	if realCalls != 1 || blobCalls != 1 {
+		t.Fatal("incorrect type binding")
+	}
+}

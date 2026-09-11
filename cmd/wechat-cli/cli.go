@@ -185,7 +185,15 @@ func maybeRunCLI(args []string) bool {
 		} else if args[1] == "retention" {
 			tool = "archive_retention"
 		}
-		runToolCLI(tool, parseKVFlags(args[2:]), opts, "archive "+args[1])
+		flags := parseKVFlags(args[2:])
+		if value := firstPositional(args[2:]); value != "" {
+			if args[1] == "validate" {
+				flags["input"] = value
+			} else if args[1] == "delete" || args[1] == "restore" {
+				flags["name"] = value
+			}
+		}
+		runToolCLI(tool, flags, opts, "archive "+args[1])
 		return true
 	case "coverage":
 		flags := parseKVFlags(args[1:])

@@ -20,7 +20,7 @@ def check_receipt(d, manifest, archive_hash):
         raise ValueError('acceptance receipt did not pass')
     if (d.get('version'),d.get('commit'),d.get('artifact_sha256'))!=(manifest['version'],manifest['commit'],archive_hash):
         raise ValueError('receipt does not identify these exact artifact bytes')
-    required={'install','doctor','keychain','sessions','timeline','context','search','media','digest','archive','update','rollback','uninstall'}
+    required={'install','doctor','keychain','sessions','timeline','context','search','media','digest','archive','update','rollback','uninstall','clean_machine','release_endpoint_install'}
     checks=d.get('checks',{})
     if not required<=checks.keys() or any(checks[k].get('status')!='passed' for k in required):
         raise ValueError('acceptance is incomplete')

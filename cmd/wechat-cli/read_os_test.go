@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/r266-tech/wx-cli/v2/internal/config"
@@ -77,7 +78,7 @@ func TestDigestHelpersSortCountsAndUsePrivateAtomicState(t *testing.T) {
 		t.Fatal("empty digest state")
 	}
 	info, err := os.Stat(filepath.Join(root, "chat", "state.json"))
-	if err != nil || info.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("digest state permissions = %v %v", info, err)
 	}
 }

@@ -60,7 +60,7 @@ def main():
     def media():
         d=call('media_resources',{'chat':chat,'type':'image','limit':10})
         # A nonempty resource list with an explicit state is needed, not just ok=true.
-        items=d.get('messages',d.get('resources',d.get('items',[])))
+        items=d.get('media',d.get('messages',d.get('resources',d.get('items',[]))))
         if not items:raise ValueError('no media sample')
         return len(items)
     record('media',media)

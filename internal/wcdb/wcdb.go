@@ -54,6 +54,8 @@ var (
 	sqlite3_bind_text      func(stmt uintptr, i int32, s string, n int32, destructor uintptr) int32
 	sqlite3_bind_blob      func(stmt uintptr, i int32, p unsafe.Pointer, n int32, destructor uintptr) int32
 	sqlite3_bind_int64     func(stmt uintptr, i int32, v int64) int32
+	sqlite3_bind_double    func(stmt uintptr, i int32, v float64) int32
+	sqlite3_bind_zeroblob  func(stmt uintptr, i int32, n int32) int32
 	sqlite3_bind_null      func(stmt uintptr, i int32) int32
 	sqlite3_reset          func(stmt uintptr) int32
 	sqlite3_clear_bindings func(stmt uintptr) int32
@@ -97,6 +99,8 @@ func Bootstrap(dylibPath string) error {
 		{&sqlite3_bind_text, "sqlite3_bind_text"},
 		{&sqlite3_bind_blob, "sqlite3_bind_blob"},
 		{&sqlite3_bind_int64, "sqlite3_bind_int64"},
+		{&sqlite3_bind_double, "sqlite3_bind_double"},
+		{&sqlite3_bind_zeroblob, "sqlite3_bind_zeroblob"},
 		{&sqlite3_bind_null, "sqlite3_bind_null"},
 		{&sqlite3_reset, "sqlite3_reset"},
 		{&sqlite3_clear_bindings, "sqlite3_clear_bindings"},
@@ -565,10 +569,14 @@ func bindArgs(stmt uintptr, args []any) error {
 			rc = sqlite3_bind_text(stmt, idx, v, int32(len(v)), ^uintptr(0))
 		case []byte:
 			if len(v) == 0 {
-				rc = sqlite3_bind_blob(stmt, idx, unsafe.Pointer(nil), 0, ^uintptr(0))
+				rc = sqlite3_bind_zeroblob(stmt, idx, 0)
 			} else {
 				rc = sqlite3_bind_blob(stmt, idx, unsafe.Pointer(&v[0]), int32(len(v)), ^uintptr(0))
 			}
+		case float64:
+			rc = sqlite3_bind_double(stmt, idx, v)
+		case float32:
+			rc = sqlite3_bind_double(stmt, idx, float64(v))
 		case int:
 			rc = sqlite3_bind_int64(stmt, idx, int64(v))
 		case int32:

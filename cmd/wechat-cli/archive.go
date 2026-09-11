@@ -167,6 +167,12 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	}
 
 	args := copyToolArgs(a)
+	resolvedTalker, err := s.resolveLooseChatArg(args)
+	if err != nil {
+		return nil, err
+	}
+	args["talker"] = resolvedTalker
+	args["chat"] = ""
 	args["view"] = "agent"
 	args["limit"] = int64(limit)
 	args["display_order"] = "asc"
@@ -174,7 +180,12 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 		args["talker"] = talker
 	}
 	if since := getBool(a, "since_last"); since {
-		if previous, err := loadDigestState(args); err == nil {
+		args["order"] = "asc"
+		previous, stateErr := loadDigestState(args)
+		if stateErr != nil && !os.IsNotExist(stateErr) {
+			return nil, fmt.Errorf("digest state invalid")
+		}
+		if stateErr == nil {
 			if previous.LocalID > 0 {
 				args["after_message"] = previous.LocalID
 			} else if previous.Timestamp > 0 {
@@ -210,7 +221,7 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	folder := filepath.Join(root, safeArchiveName(name))
+	folder := filepath.Join(root, digestFolderName(resolvedTalker))
 	if err := os.MkdirAll(filepath.Join(folder, "sources"), 0o700); err != nil {
 		return nil, err
 	}
@@ -365,7 +376,7 @@ func loadDigestState(a map[string]any) (digestCursor, error) {
 	if err != nil {
 		return digestCursor{}, err
 	}
-	name := safeArchiveName(firstNonEmpty(getStr(a, "chat"), getStr(a, "talker"), "chat"))
+	name := digestFolderName(firstNonEmpty(getStr(a, "talker"), getStr(a, "chat"), "chat"))
 	b, err := os.ReadFile(filepath.Join(root, name, "state.json"))
 	if err != nil {
 		return digestCursor{}, err
@@ -621,11 +632,14 @@ func (s *server) toolArchiveList(a map[string]any) (any, error) {
 }
 
 func (s *server) toolArchiveDelete(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only_blocked")
+	}
 	if !getBool(a, "quarantine") {
 		return nil, fmt.Errorf("archive delete requires quarantine=true")
 	}
 	name := strings.TrimSpace(getStr(a, "name"))
-	if name == "" || filepath.Base(name) != name || strings.Contains(name, string(os.PathSeparator)) {
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, ".") || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
 		return nil, fmt.Errorf("name must be a single archive directory name")
 	}
 	root, err := archiveBaseDir()
@@ -648,8 +662,11 @@ func (s *server) toolArchiveDelete(a map[string]any) (any, error) {
 }
 
 func (s *server) toolArchiveRestore(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only_blocked")
+	}
 	name := strings.TrimSpace(getStr(a, "name"))
-	if name == "" || filepath.Base(name) != name {
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, ".") || filepath.Base(name) != name || strings.ContainsAny(name, "/\\") {
 		return nil, fmt.Errorf("name must be a single quarantine directory name")
 	}
 	root, err := archiveBaseDir()
@@ -723,8 +740,10 @@ func (s *server) toolArchiveRetention(a map[string]any) (any, error) {
 	if err := collect(digestRoot, "digest", 14*24*time.Hour); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(quarantineRoot, 0o700); err != nil && apply {
-		return nil, err
+	if apply {
+		if err := os.MkdirAll(quarantineRoot, 0o700); err != nil {
+			return nil, err
+		}
 	}
 	moved := []map[string]any{}
 	if apply {
@@ -737,4 +756,9 @@ func (s *server) toolArchiveRetention(a map[string]any) (any, error) {
 		}
 	}
 	return map[string]any{"policy": map[string]any{"digest_days": 14, "archive_days": 14, "quarantine_days": 7}, "dry_run": !apply, "candidates": candidates, "moved": moved, "permanent_delete": false, "receipt_at": now.Format(time.RFC3339)}, nil
+}
+
+func digestFolderName(talker string) string {
+	sum := sha256.Sum256([]byte(talker))
+	return fmt.Sprintf("chat-%x", sum[:12])
 }

@@ -11,7 +11,7 @@ var sourceCommit = "development"
 const (
 	appName       = "wechat-cli"
 	legacyAppName = "wx-mcp"
-	appVersion    = "2.0.1-rc.1"
+	appVersion    = "2.0.1-rc.2"
 
 	stateDirName       = ".wechat-cli"
 	legacyStateDirName = ".wx-mcp"
