@@ -14,7 +14,7 @@ and user state locations remain compatible. No automatic user-state migration is
 performed by repository migration. Additive JSON fields are version/commit metadata.
 
 The initial public source tag `v2.0.0` identifies the initial import, not an accepted
-binary release. It is not moved. The next corrected candidate uses `v2.0.1-rc.1`;
+binary release. It is not moved. The current corrected candidate uses `v2.0.1-rc.4`;
 formal `v2.0.1` requires all gates. Do not reuse a published source tag or asset name.
 
 ## Build inputs
@@ -77,3 +77,15 @@ state to simulate a fresh machine. A same-host isolated installation is not proo
 of a truly new Mac: a separate Mac/VM acceptance remains a separate receipt check.
 Do not mark skipped or blocked checks passed. Preserve the current default release
 and user's working installation until the corrected signed release is accepted.
+
+### Keychain authorization after an update
+
+An ad-hoc signed candidate has a different code identity from an older binary.
+macOS can therefore require authorization to read the existing runtime item.
+Normal commands remain noninteractive: `keychain status` reports
+`keychain_access_required` with `loaded=false`, without exposing the item.
+Run `wechat-cli keychain authorize --interactive` from the candidate installation
+and complete the native macOS dialog, then retry `keychain status` and acceptance.
+This command only reads the existing account item; it does not rewrite config,
+export secrets, migrate records, or change the access list itself. Strict
+read-only mode blocks it. Denial/cancellation leaves the old installation intact.

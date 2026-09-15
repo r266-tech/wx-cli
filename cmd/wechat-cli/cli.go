@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r266-tech/wx-cli/v2/internal/keystore"
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
@@ -64,7 +66,10 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "agent", Aliases: []string{"read-os", "read_os", "os"}, Tool: "read_os", Usage: appName + " agent [--mode overview|coverage|workflows|status]", Description: "Agent-first WeChat Read OS entrypoint: capability map, workflows, coverage matrix, and readiness status.", Examples: []string{appName + " agent --pretty", appName + " agent --mode coverage --pretty"}},
 	{Command: "status", Aliases: []string{"doctor-lite", "doctor_lite"}, Tool: "read_os", Usage: appName + " status", Description: "Show local readiness status without reading large message bodies.", Examples: []string{appName + " status --pretty"}},
 	{Command: "doctor", Tool: "read_os", Usage: appName + " doctor [--full]", Description: "Report executable, PATH, install, wxkey, WCDB, config, cache, and live-read provenance without refreshing local state.", Examples: []string{appName + " doctor --pretty", appName + " doctor --full --pretty"}},
-	{Command: "keychain", Usage: appName + " keychain <status|migrate>", Description: "Inspect or migrate macOS runtime keys to Keychain.", Examples: []string{appName + " keychain status", appName + " keychain migrate"}},
+	{Command: "keychain", Usage: appName + " keychain <status|migrate|authorize>", Description: "Inspect, migrate or explicitly authorize macOS runtime keys.", Examples: []string{appName + " keychain status", appName + " keychain authorize --interactive", appName + " keychain migrate"}},
+	{Command: "keychain status", Tool: "keychain_status", Usage: appName + " keychain status", Examples: []string{appName + " keychain status"}},
+	{Command: "keychain migrate", Tool: "keychain_migrate", Usage: appName + " keychain migrate", Examples: []string{appName + " keychain migrate"}},
+	{Command: "keychain authorize", Tool: "keychain_authorize", Usage: appName + " keychain authorize --interactive", Examples: []string{appName + " keychain authorize --interactive"}},
 	{Command: "digest-source", Tool: "digest_source", Usage: appName + " digest-source <chat> [--since-last] [--data-root PATH] [--confirm-external-output]", Positional: "chat", Description: "Write an explicit private digest source package with live messages, freshness, cursor state, and provenance.", Examples: []string{appName + ` digest-source "$CHAT" --since-last`, appName + ` digest-source "$CHAT" --data-root ~/.wechat-cli/digests`}},
 	{Command: "archive", Usage: appName + " archive <create|validate|list|delete|restore>", Description: "Explicitly create, validate, list, quarantine-delete, or restore a private plaintext SQLite archive.", Examples: []string{appName + " archive create", appName + " archive validate ~/.wechat-cli/archives/<timestamp>", appName + " archive list"}},
 	{Command: "coverage", Tool: "read_os", Usage: appName + " coverage", Description: "Show the WeChat Read OS coverage matrix.", Examples: []string{appName + " coverage --pretty"}},
@@ -155,7 +160,7 @@ func maybeRunCLI(args []string) bool {
 		runToolCLI("read_os", flags, opts, args[0])
 		return true
 	case "keychain":
-		if len(args) < 2 || (args[1] != "status" && args[1] != "migrate") {
+		if len(args) < 2 || (args[1] != "status" && args[1] != "migrate" && args[1] != "authorize") {
 			runCLIHelp("keychain", opts)
 			return true
 		}
@@ -651,10 +656,15 @@ func runToolResult(name string, flags map[string]any, command string) (any, stri
 		result, err = srv.toolKeychainStatus(flags)
 	case "keychain_migrate":
 		result, err = srv.toolKeychainMigrate(flags)
+	case "keychain_authorize":
+		result, err = srv.toolKeychainAuthorize(flags)
 	default:
 		err = fmt.Errorf("unknown cli tool %q", name)
 	}
 	if err != nil {
+		if errors.Is(err, keystore.ErrInteractionRequired) || errors.Is(err, keystore.ErrAuthorizationDenied) || errors.Is(err, keystore.ErrItemNotFound) || errors.Is(err, keystore.ErrUnavailable) {
+			return nil, keychainDiagnosticCode(err), err
+		}
 		return nil, "tool_error", err
 	}
 	return cliAgentDataEnvelope(name, command, responseArgs, result), "", nil
@@ -1117,6 +1127,7 @@ func cliToolNames() []string {
 		"archive_restore",
 		"keychain_status",
 		"keychain_migrate",
+		"keychain_authorize",
 	}
 }
 
@@ -1166,6 +1177,16 @@ func cliErrorAdvice(errCode, message, tool, command string) cliAdvice {
 		schemaCmd = appName + " tool-schema " + cmd
 	}
 	switch errCode {
+	case "keychain_access_required", "keychain_authorization_denied":
+		return cliAdvice{
+			NextAction:        "Run keychain authorize --interactive locally and approve the macOS dialog, then retry the read.",
+			SuggestedCommands: []string{appName + " keychain authorize --interactive", appName + " keychain status"},
+		}
+	case "keychain_item_missing", "keychain_unavailable":
+		return cliAdvice{
+			NextAction:        "Inspect the Keychain store and use a macOS build with native Keychain support. A missing item requires restoring its protected backup or repeating setup.",
+			SuggestedCommands: []string{appName + " keychain status", appName + " doctor --full"},
+		}
 	case "unknown_command":
 		return cliAdvice{
 			NextAction:        "List commands or start from the agent entrypoint.",

@@ -66,6 +66,56 @@ func Path() (string, error) {
 }
 
 func Load() (*Config, error) {
+	c, err := loadPersistentConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := hydrateRuntimeKeys(c); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+// RuntimeKeyMetadata is safe to inspect when Keychain access is unavailable.
+// It intentionally has no field that can hold secret material.
+type RuntimeKeyMetadata struct {
+	Store  string
+	DBRoot string
+	Wxid   string
+}
+
+func LoadRuntimeKeyMetadata() (RuntimeKeyMetadata, error) {
+	c, err := loadPersistentConfig()
+	if err != nil {
+		return RuntimeKeyMetadata{}, err
+	}
+	store := "missing"
+	if c.KeyStore == "keychain" {
+		store = "keychain"
+	} else if len(c.Keys) > 0 {
+		store = "config_legacy"
+	}
+	return RuntimeKeyMetadata{Store: store, DBRoot: c.DBRoot, Wxid: c.Wxid}, nil
+}
+
+// LoadWithKeychainAuthorization is only for the explicit local authorize
+// command. Reference/account validation precedes any OS prompt. No config write
+// or migration occurs here, including when the user cancels the prompt.
+func LoadWithKeychainAuthorization() (*Config, error) {
+	c, err := loadPersistentConfig()
+	if err != nil {
+		return nil, err
+	}
+	if c.KeyStore != "keychain" {
+		return nil, errors.New("keychain reference is missing; run keychain migrate first")
+	}
+	if err := hydrateRuntimeKeysWith(c, runtimeKeyAuthorize); err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func loadPersistentConfig() (*Config, error) {
 	p, err := Path()
 	if err != nil {
 		return nil, err
@@ -84,9 +134,6 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 	applyEnvOverrides(&c)
-	if err := hydrateRuntimeKeys(&c); err != nil {
-		return nil, err
-	}
 	return &c, nil
 }
 
@@ -518,19 +565,29 @@ func lastIndex(s, sep string) int {
 
 var runtimeKeyLoad = keystore.Load
 var runtimeKeySave = keystore.Save
+var runtimeKeyAuthorize = keystore.LoadWithAuthorization
 
 func hydrateRuntimeKeys(c *Config) error {
+	return hydrateRuntimeKeysWith(c, runtimeKeyLoad)
+}
+
+func hydrateRuntimeKeysWith(c *Config, load func(string, string) (*keystore.Record, error)) error {
 	if c.KeyStore != "keychain" {
 		return nil
 	}
 	if c.DBRoot == "" || c.Wxid == "" || c.KeyStoreRef != keystore.Account(c.DBRoot, c.Wxid) {
 		return errors.New("keychain reference mismatch")
 	}
-	record, err := runtimeKeyLoad(c.DBRoot, c.Wxid)
+	record, err := load(c.DBRoot, c.Wxid)
 	if err != nil {
+		for _, known := range []error{keystore.ErrInteractionRequired, keystore.ErrItemNotFound, keystore.ErrAuthorizationDenied, keystore.ErrUnavailable} {
+			if errors.Is(err, known) {
+				return fmt.Errorf("keychain runtime keys unavailable: %w", known)
+			}
+		}
 		return errors.New("keychain runtime keys unavailable")
 	}
-	if record.WxID != c.Wxid || record.DBRoot != c.DBRoot || record.SchemaVersion != 1 || len(record.Keys) == 0 {
+	if record == nil || record.WxID != c.Wxid || record.DBRoot != c.DBRoot || record.SchemaVersion != 1 || len(record.Keys) == 0 {
 		return errors.New("keychain record mismatch")
 	}
 	if record.KeyEpoch < c.KeyEpoch {
