@@ -86,7 +86,7 @@ func toolLocalWriteMode(name string) string {
 	switch name {
 	case "cache_refresh", "cache_rebuild", "export_messages":
 		return "required"
-	case "digest_source", "archive_create":
+	case "digest_source", "archive_create", "keychain_migrate", "keychain_authorize":
 		return "required"
 	case "messages", "chat_timeline", "message_context", "read_events", "media_resources", "search_with_context", "forward_history":
 		return "possible"
@@ -238,11 +238,9 @@ func toolInProfile(name, profile string) bool {
 		}
 	case "maintenance":
 		switch name {
-		case "cache_status", "cache_refresh", "cache_rebuild", "export_messages", "schema", "sql", "archive_create", "archive_validate", "archive_list", "archive_delete", "archive_restore":
+		case "cache_status", "cache_refresh", "cache_rebuild", "export_messages", "schema", "sql", "archive_create", "archive_validate", "archive_list", "archive_delete", "archive_restore", "keychain_status", "keychain_migrate", "keychain_authorize":
 			return true
 		}
-	case "keychain_status", "keychain_migrate":
-		return true
 	}
 	return false
 }
@@ -307,6 +305,9 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "keychain_migrate", Description: "将旧 config.json schema-2 keys 安全迁移到 macOS Keychain，并保留可回滚配置.", InputSchema: jsonSchema(props{}, nil),
+	},
+	{
+		Name: "keychain_authorize", Description: "显式请求 macOS 对当前二进制授予已有 Keychain item 的访问权；用户在系统弹窗中操作，不输出密钥，不修改 config.", InputSchema: jsonSchema(props{"interactive": boolProp("必须显式为 true；允许本次调用显示 macOS 授权窗口")}, []string{"interactive"}),
 	},
 	{
 		Name: "sessions",

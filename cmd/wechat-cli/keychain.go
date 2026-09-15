@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -12,29 +13,67 @@ import (
 )
 
 func (s *server) toolKeychainStatus(a map[string]any) (any, error) {
-	cfg, err := config.Load()
+	metadata, err := config.LoadRuntimeKeyMetadata()
 	if err != nil {
 		return nil, err
 	}
-	store := "missing"
-	if cfg.KeyStore == "keychain" {
-		store = "keychain"
-	} else if len(cfg.Keys) > 0 {
-		store = "config_legacy"
-	}
+	store := metadata.Store
 	available := runtime.GOOS == "darwin" && keystore.Available()
 	loaded := false
-	if available && cfg.DBRoot != "" && cfg.Wxid != "" {
-		_, loadErr := keystore.Load(cfg.DBRoot, cfg.Wxid)
-		loaded = loadErr == nil
+	var loadErr error
+	if available && store == "keychain" {
+		cfg, err := config.Load()
+		loadErr = err
+		loaded = err == nil && cfg.Ready()
 	}
-	return map[string]any{
+	data := map[string]any{
 		"available":        available,
 		"store":            store,
 		"loaded":           loaded,
 		"config_path":      configPathSafe(),
 		"migration_needed": store == "config_legacy" && available,
-	}, nil
+	}
+	if loadErr != nil {
+		code := keychainDiagnosticCode(loadErr)
+		data["code"] = code
+		if code == "keychain_access_required" {
+			data["next_action"] = "Run keychain authorize --interactive and approve access in the macOS dialog, then retry status."
+			data["suggested_commands"] = []string{appName + " keychain authorize --interactive", appName + " keychain status"}
+		}
+	}
+	return data, nil
+}
+
+func keychainDiagnosticCode(err error) string {
+	switch {
+	case errors.Is(err, keystore.ErrInteractionRequired):
+		return "keychain_access_required"
+	case errors.Is(err, keystore.ErrAuthorizationDenied):
+		return "keychain_authorization_denied"
+	case errors.Is(err, keystore.ErrItemNotFound):
+		return "keychain_item_missing"
+	case errors.Is(err, keystore.ErrUnavailable):
+		return "keychain_unavailable"
+	default:
+		return "keychain_record_invalid"
+	}
+}
+
+func (s *server) toolKeychainAuthorize(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only: keychain authorization can change macOS access state")
+	}
+	if !getBool(a, "interactive") {
+		return nil, fmt.Errorf("keychain authorization requires explicit --interactive and a local macOS dialog")
+	}
+	if !keystore.Available() {
+		return nil, keystore.ErrUnavailable
+	}
+	cfg, err := config.LoadWithKeychainAuthorization()
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"store": "keychain", "loaded": cfg.Ready(), "status": "authorized", "key_count": len(cfg.Keys)}, nil
 }
 
 func (s *server) toolKeychainMigrate(a map[string]any) (any, error) {

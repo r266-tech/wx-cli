@@ -4,6 +4,9 @@ package keystore
 
 import "errors"
 
+func Available() bool                                       { return false }
+func LoadWithAuthorization(string, string) (*Record, error) { return nil, ErrUnavailable }
+
 func Save(Record) error { return errors.New("Keychain unavailable in cgo-disabled build") }
 func Load(string, string) (*Record, error) {
 	return nil, errors.New("Keychain unavailable in cgo-disabled build")

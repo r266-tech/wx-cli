@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"runtime"
 	"strings"
 )
 
@@ -25,6 +24,10 @@ func Account(dbRoot, wxid string) string {
 	h := sha256.Sum256([]byte(strings.TrimSpace(dbRoot) + "\x00" + strings.TrimSpace(wxid)))
 	return hex.EncodeToString(h[:])
 }
-func Available() bool { return runtime.GOOS == "darwin" }
 
 var ErrUnavailable = errors.New("keychain runtime store is only available on macOS")
+
+// These errors contain no account or key material and may cross the CLI boundary.
+var ErrInteractionRequired = errors.New("keychain access requires macOS authorization")
+var ErrItemNotFound = errors.New("keychain runtime item is missing")
+var ErrAuthorizationDenied = errors.New("keychain authorization was denied or cancelled")
