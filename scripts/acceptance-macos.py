@@ -13,14 +13,49 @@ from pathlib import Path
 from release_lib import sha256
 
 
+def digest_message_ids(document, require_messages=False):
+    # Older candidates encode an empty incremental window as null. It means
+    # no new messages; a missing field or malformed identity is still a failure.
+    if not isinstance(document, dict) or 'messages' not in document:
+        raise ValueError('digest_messages_missing')
+    rows = document['messages']
+    if rows is None:
+        rows = []
+    if not isinstance(rows, list) or (require_messages and not rows):
+        raise ValueError('digest_messages_empty_or_invalid')
+    identities = set()
+    for row in rows:
+        identity = row.get('id') if isinstance(row, dict) else None
+        if not isinstance(identity, dict) or not identity.get('local_id'):
+            raise ValueError('digest_identity_missing')
+        item = (str(identity.get('talker', '')), str(identity['local_id']), str(identity.get('server_id_str', '')))
+        if item in identities:
+            raise ValueError('digest_duplicate_message')
+        identities.add(item)
+    return identities
+
+
+def validate_digest_windows(first, second):
+    left = digest_message_ids(first, require_messages=True)
+    right = digest_message_ids(second)
+    if left & right:
+        raise ValueError('digest_repeated_messages')
+    return len(left)
+
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--binary',required=True);ap.add_argument('--archive',required=True)
+    ap.add_argument('--archive-timeout', type=int, default=600, help='Bounded seconds for full database export (1..3600).')
+    ap.add_argument('--skip-archive', action='store_true', help='Record archive as not_run; never count it as passed.')
     a=ap.parse_args();binary=str(Path(a.binary).resolve());env=os.environ.copy();env['WECHAT_CLI_STRICT_READ_ONLY']='1'
+    if not 1 <= a.archive_timeout <= 3600:
+        ap.error('--archive-timeout must be between 1 and 3600 seconds')
     checks={}
     def call(tool,args=None,writes=False):
         local=env.copy()
         if writes:local['WECHAT_CLI_STRICT_READ_ONLY']='0'
-        proc=subprocess.run([binary,'call-json',tool],input=json.dumps(args or {}),text=True,capture_output=True,env=local,timeout=45)
+        timeout = a.archive_timeout if tool == 'archive_create' else 45
+        proc=subprocess.run([binary,'call-json',tool],input=json.dumps(args or {}),text=True,capture_output=True,env=local,timeout=timeout)
         d=json.loads(proc.stdout)
         if proc.returncode or not d.get('ok'):raise ValueError('tool_failed')
         return d['data']
@@ -28,6 +63,8 @@ def main():
         before=time.monotonic()
         try:
             count=fn();checks[name]={'status':'passed','count':int(count or 0)}
+        except subprocess.TimeoutExpired:
+            checks[name]={'status':'failed','warning_codes':['acceptance_timeout']}
         except Exception:
             checks[name]={'status':'failed','warning_codes':['acceptance_failed']}
         checks[name]['duration_ms']=round((time.monotonic()-before)*1000)
@@ -74,10 +111,7 @@ def main():
         f=Path(before['source_json']);first=sha256(f)
         again=call('digest_source',{'talker':chat,'limit':10,'since_last':True},True)
         if sha256(f)!=first:raise ValueError('digest overwritten')
-        left=json.loads(f.read_text())['messages'];right=json.loads(Path(again['source_json']).read_text())['messages']
-        ids=lambda rows:{(m['id'].get('local_id'),m['id'].get('server_id_str')) for m in rows}
-        if ids(left)&ids(right):raise ValueError('digest repeated messages')
-        return len(left)
+        return validate_digest_windows(json.loads(f.read_text()), json.loads(Path(again['source_json']).read_text()))
     record('digest',digest)
     def archive():
         data=call('archive_create',{},True)
@@ -85,7 +119,10 @@ def main():
         result=call('archive_validate',{'input':data['archive_root']})
         if not result['valid']:raise ValueError('archive invalid')
         return data['succeeded']
-    record('archive',archive)
+    if a.skip_archive:
+        checks['archive']={'status':'not_run','warning_codes':['archive_explicitly_skipped']}
+    else:
+        record('archive',archive)
     return finish(a,version,checks)
 
 def finish(a,version,checks):
