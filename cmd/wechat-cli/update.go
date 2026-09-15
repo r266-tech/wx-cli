@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,15 +21,20 @@ const (
 )
 
 type updateOptions struct {
-	DryRun       bool
-	KeepDownload bool
-	Repo         string
-	Tag          string
-	Asset        string
-	InstallDir   string
+	DryRun          bool
+	KeepDownload    bool
+	Repo            string
+	Tag             string
+	Asset           string
+	InstallDir      string
+	AllowPrerelease bool
 }
 
 func runUpdateCLI(args []string, opts cliOptions) {
+	if opts.StrictReadOnly || strictReadOnlyMode() {
+		exitCLIError(opts, 1, "strict_read_only_blocked", "update downloads and installs local files; rerun without strict read-only mode", "update", "update")
+		return
+	}
 	updateOpts, err := parseUpdateArgs(args)
 	if err != nil {
 		exitCLIError(opts, 2, "invalid_argument", err.Error(), "update", "update")
@@ -50,6 +56,8 @@ func parseUpdateArgs(args []string) (updateOptions, error) {
 			opts.DryRun = true
 		case arg == "--keep-download":
 			opts.KeepDownload = true
+		case arg == "--allow-prerelease":
+			opts.AllowPrerelease = true
 		case arg == "--repo":
 			v, err := updateArgValue(args, &i, arg)
 			if err != nil {
@@ -78,8 +86,26 @@ func parseUpdateArgs(args []string) (updateOptions, error) {
 			return opts, fmt.Errorf("unknown update argument %q", arg)
 		}
 	}
-	if opts.Repo == "" && os.Getenv("WECHAT_CLI_REPO") == "" && os.Getenv("WX_MCP_REPO") == "" {
-		opts.Repo = "https://github.com/r266-tech/wechat-cli-releases"
+	if opts.Repo == "" {
+		opts.Repo = firstNonEmpty(envFirst("WECHAT_CLI_RELEASE_REPO", "WECHAT_CLI_REPO", "WX_MCP_REPO"), "r266-tech/wechat-cli-releases")
+	}
+	if opts.Tag == "" {
+		opts.Tag = envFirst("WECHAT_CLI_RELEASE_TAG")
+	}
+	if opts.Repo != "" {
+		opts.Repo = strings.TrimSuffix(strings.TrimPrefix(opts.Repo, "https://github.com/"), "/")
+		if !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$`).MatchString(opts.Repo) {
+			return opts, fmt.Errorf("--repo must be a GitHub owner/repository or https://github.com/owner/repository")
+		}
+	}
+	if opts.Tag != "" && opts.Tag != "latest" && !regexp.MustCompile(`^v[0-9][0-9A-Za-z.+-]*$`).MatchString(opts.Tag) {
+		return opts, fmt.Errorf("invalid release tag")
+	}
+	if opts.AllowPrerelease && (!strings.Contains(opts.Tag, "-") || opts.Tag == "latest") {
+		return opts, fmt.Errorf("--allow-prerelease requires an explicit prerelease --tag")
+	}
+	if opts.AllowPrerelease && runtime.GOOS == "windows" {
+		return opts, fmt.Errorf("prerelease bootstrap currently supports macOS only")
 	}
 	return opts, nil
 }
@@ -97,6 +123,9 @@ func updateArgValue(args []string, idx *int, name string) (string, error) {
 }
 
 func runReleaseUpdate(opts updateOptions) (map[string]any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only_blocked: update writes local files")
+	}
 	if strings.TrimSpace(opts.InstallDir) == "" {
 		installDir, err := currentExecutableInstallDir()
 		if err != nil {
@@ -167,13 +196,16 @@ func darwinUpdateCommandArgs(opts updateOptions) []string {
 url="$1"
 shift
 curl -fsSL "$url" | env WECHAT_CLI_INSTALL_JSON=1 zsh -s -- "$@"`
-	args := []string{"-c", script, "wechat-cli-update", releaseInstallShellURL}
+	args := []string{"-c", script, "wechat-cli-update", updateBootstrapURL(opts, "install-release.sh")}
 	args = append(args, releaseInstallerArgs(opts)...)
 	return args
 }
 
 func releaseInstallerArgs(opts updateOptions) []string {
 	args := []string{"--update"}
+	if opts.AllowPrerelease {
+		args = append(args, "--allow-prerelease")
+	}
 	if opts.DryRun {
 		args = append(args, "--dry-run")
 	}
@@ -192,6 +224,18 @@ func releaseInstallerArgs(opts updateOptions) []string {
 	return args
 }
 
+func updateBootstrapURL(opts updateOptions, name string) string {
+	repo := strings.TrimSuffix(strings.TrimPrefix(opts.Repo, "https://github.com/"), "/")
+	if repo == "" {
+		repo = "r266-tech/wechat-cli-releases"
+	}
+	base := "https://github.com/" + repo + "/releases/"
+	if opts.Tag == "" || opts.Tag == "latest" {
+		return base + "latest/download/" + name
+	}
+	return base + "download/" + opts.Tag + "/" + name
+}
+
 func startWindowsReleaseUpdate(opts updateOptions) (map[string]any, error) {
 	data := updateResultBase(opts)
 	logPath, err := updateLogPath()
@@ -208,7 +252,7 @@ func startWindowsReleaseUpdate(opts updateOptions) (map[string]any, error) {
 		"-ExecutionPolicy", "Bypass",
 		"-File", scriptPath,
 		"-ParentPid", strconv.Itoa(os.Getpid()),
-		"-Url", releaseInstallPowerShellURL,
+		"-Url", updateBootstrapURL(opts, "install-release.ps1"),
 		"-LogPath", logPath,
 		"-InstallDir", opts.InstallDir,
 	}

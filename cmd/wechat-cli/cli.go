@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/r266-tech/wx-cli/v2/internal/diagnostics"
 	"github.com/r266-tech/wx-cli/v2/internal/keystore"
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
@@ -91,7 +92,7 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "contacts", Tool: "contacts", Usage: appName + " contacts [--keyword 李] [--label 客户|--label-id 5]", Examples: []string{appName + " contacts --keyword 李 --limit 20", appName + ` contacts --label "$LABEL" --limit 50`}},
 	{Command: "labels", Aliases: []string{"contact-labels", "contact_labels", "contact-tags", "contact_tags"}, Tool: "contact_labels", Usage: appName + " labels [--keyword 客户]", Description: "List contact labels and membership counts. Use contacts --label/--label-id to list members.", Examples: []string{appName + " labels", appName + ` contacts --label "$LABEL" --limit 50`}},
 	{Command: "history", Aliases: []string{"messages"}, Tool: "messages", Usage: appName + " history <chat> [--limit 50] [--after 2026-05-11] [--view agent]", Positional: "chat", Examples: []string{appName + ` history "$CHAT" --view agent --limit 50`}},
-	{Command: "timeline", Aliases: []string{"chat-timeline", "chat_timeline", "conversation-view", "conversation_view"}, Tool: "chat_timeline", Usage: appName + " timeline <chat> [--limit 10] [--display-order asc]", Positional: "chat", Examples: []string{appName + ` timeline "$CHAT" --limit 20`, appName + ` timeline "$CHAT" --limit 20 --offset 20`}},
+	{Command: "timeline", Aliases: []string{"chat-timeline", "chat_timeline", "conversation-view", "conversation_view"}, Tool: "chat_timeline", Usage: appName + " timeline <chat> [--limit 10] [--display-order asc]", Positional: "chat", Examples: []string{appName + ` timeline "$CHAT" --limit 20`, appName + ` timeline "$CHAT" --limit 20 --before-message "$CURSOR"`}},
 	{Command: "context", Aliases: []string{"message-context", "message_context", "around"}, Tool: "message_context", Usage: appName + " context <chat> --local-id 123 [--before-count 20] [--after-count 20]", Positional: "chat", Examples: []string{appName + ` context "$CHAT" --local-id 123 --before-count 10 --after-count 10`, appName + ` context "$CHAT" --server-id-str 9876543210 --pretty`}},
 	{Command: "tail", Aliases: []string{"watch", "observe", "events"}, Tool: "read_events", Usage: appName + " tail [chat] [--since-local-id 123] [--jsonl] [--follow]", Positional: "chat", Description: "Read-only event tail for agents. Normal mode returns the standard envelope; --jsonl/--follow emit newline-delimited event objects.", Examples: []string{appName + ` tail "$CHAT" --since-local-id 123`, appName + ` tail "$CHAT" --since-local-id 123 --jsonl`, appName + " watch --mode sessions --jsonl --follow"}},
 	{Command: "media", Aliases: []string{"media-resources", "media_resources", "attachments"}, Tool: "media_resources", Usage: appName + " media <chat> [--local-id 123] [--type image|video|file]", Positional: "chat", Examples: []string{appName + ` media "$CHAT" --local-id 10`, appName + ` media "$CHAT" --type image --limit 20`}},
@@ -1149,6 +1150,7 @@ func writeCLISuccess(tool, command string, data any, opts cliOptions) {
 }
 
 func exitCLIError(opts cliOptions, code int, errCode, message, tool, command string) {
+	message = diagnostics.Redact(message)
 	advice := cliErrorAdvice(errCode, message, tool, command)
 	writeJSONCLI(cliErrorEnvelope{
 		OK: false,
@@ -1624,7 +1626,9 @@ func agentHelpForTool(spec cliCommandSpec, tool toolDef) map[string]any {
 	if hasAnyProp(props, "chat", "talker", "chatroom_id") {
 		strategy = append(strategy, "If a human chat name may be ambiguous, run resolve-chat first and pass the returned username as talker/chatroom_id.")
 	}
-	if hasAnyProp(props, "limit", "offset") && tool.Name != "message_context" {
+	if tool.Name == "chat_timeline" || tool.Name == "messages" {
+		strategy = append(strategy, "For complete reads, pass data.query.cursor.next_before_message as before_message while data.query.has_more is true; use next_after_message for newer messages. Keep offset at zero when using a cursor.")
+	} else if hasAnyProp(props, "limit", "offset") && tool.Name != "message_context" {
 		strategy = append(strategy, "For complete reads, loop while data.query.has_more is true when available; otherwise increment offset by the returned item count until fewer than limit rows return.")
 	}
 	if hasAnyProp(props, "after", "before") {

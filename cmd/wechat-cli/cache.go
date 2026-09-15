@@ -1155,44 +1155,6 @@ func snapshotFor(files []cacheFileMeta, rel string) string {
 	return ""
 }
 
-func (s *server) cacheSessions(a map[string]any) ([]wcdb.Row, []string, bool, error) {
-	db, warnings, err := s.openCacheIndexWithWarnings()
-	if err != nil {
-		if errors.Is(err, errCacheMissing) {
-			return nil, nil, false, nil
-		}
-		return nil, warnings, false, err
-	}
-	defer db.Close()
-	var where []string
-	var args []any
-	if kw := getStr(a, "keyword"); kw != "" {
-		where = append(where, "(s.username LIKE ? COLLATE NOCASE OR s.summary LIKE ? COLLATE NOCASE OR s.display_name LIKE ? COLLATE NOCASE)")
-		like := "%" + kw + "%"
-		args = append(args, like, like, like)
-	}
-	wc := ""
-	if len(where) > 0 {
-		wc = "WHERE " + strings.Join(where, " AND ")
-	}
-	query := fmt.Sprintf(`SELECT s.username, s.display_name, s.unread_count, s.summary, s.last_timestamp, s.sort_timestamp,
-		s.last_sender_wxid, s.last_sender_display_name, s.last_msg_type, s.last_msg_sub_type, s.last_msg_kind_name,
-		c.type AS contact_type, c.is_verified
-		FROM sessions_unified s LEFT JOIN contacts_unified c ON c.username = s.username
-		%s ORDER BY s.sort_timestamp DESC, s.username DESC LIMIT ? OFFSET ?`, wc)
-	limit := getInt(a, "limit", 50)
-	offset := maxInt(getInt(a, "offset", 0), 0)
-	typeFilter := getStr(a, "type_filter")
-	rows, err := collectSessionPage(limit, offset, typeFilter, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
-		queryArgs := append(append([]any(nil), args...), fetchLimit, scanOffset)
-		return db.Query(query, queryArgs...)
-	})
-	if err != nil {
-		return nil, warnings, false, err
-	}
-	return rows, warnings, true, nil
-}
-
 // collectSessionPage applies offset after any chat-type post-filter. CLI
 // callers pass an already over-fetched limit for has_more detection; internal
 // callers receive exactly the limit they requested. It scans to source
@@ -1248,36 +1210,6 @@ func decorateMessageSearchRows(rows []wcdb.Row) {
 			r["content"] = senderPrefixRe.ReplaceAllString(c, "")
 		}
 	}
-}
-
-func (s *server) toolUnread(a map[string]any) (any, error) {
-	db, warnings, err := s.openCacheIndexWithWarnings()
-	if err != nil {
-		if errors.Is(err, errCacheMissing) {
-			args := copyToolArgs(a)
-			args["unread_only"] = true
-			return s.toolSessions(args)
-		}
-		return nil, err
-	}
-	defer db.Close()
-	limit := getInt(a, "limit", 50)
-	offset := getInt(a, "offset", 0)
-	tf := getStr(a, "type_filter")
-	if tf == "" {
-		tf = getStr(a, "filter")
-	}
-	rows, err := collectSessionPage(limit, offset, tf, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
-		return db.Query(`SELECT s.username, s.display_name, s.unread_count, s.summary, s.last_timestamp, s.sort_timestamp,
-		s.last_sender_wxid, s.last_sender_display_name, s.last_msg_type, s.last_msg_sub_type, s.last_msg_kind_name,
-		c.type AS contact_type, c.is_verified
-		FROM sessions_unified s LEFT JOIN contacts_unified c ON c.username = s.username
-		WHERE s.unread_count > 0 ORDER BY s.sort_timestamp DESC, s.username DESC LIMIT ? OFFSET ?`, fetchLimit, scanOffset)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return sessionRowsResult(rows, "metadata_cache_sessions", warnings), nil
 }
 
 func (s *server) toolStats(a map[string]any) (any, error) {

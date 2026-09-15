@@ -20,6 +20,16 @@
 
 ### macOS
 
+当前 macOS 预发布版为 **v2.0.1-rc.5**，直接发布在本源码仓库的 Releases。它采用 ad-hoc 签名，尚未经过 Apple 公证。安装或更新此预发布版：
+
+```bash
+curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.5/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease
+```
+
+已有此预发布版时，可用 `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease`。预发布安装同样校验 checksum、manifest 和组件哈希；不会被稳定频道自动选中。完整归档仍可能因部分库缺密钥而失败，必须检查 `failed` 和校验结果。
+
+以下是独立 Release 仓库的稳定频道入口：
+
 ```bash
 curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh
 ~/.local/share/wechat-cli/wxkey bootstrap
@@ -57,6 +67,8 @@ wechat-cli tools
 ```
 
 正常阅读从 `sessions → resolve-chat → timeline` 开始：
+
+`sessions` 与 `unread` 直接读取实时 session 数据库；旧 metadata cache 不再决定最近会话和未读数量。`status.live_read_ok` 会实际打开数据库查询，配置存在本身不算读取成功。
 
 ```bash
 wechat-cli sessions --type-filter private,group --limit 20

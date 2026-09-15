@@ -213,6 +213,9 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 		}
 	}
 
+	if messages == nil {
+		messages = []map[string]any{}
+	}
 	name := firstNonEmpty(getStr(args, "chat"), getStr(args, "talker"), "chat")
 	if query, ok := payload["query"].(map[string]any); ok {
 		name = firstNonEmpty(getStr(query, "display_name"), getStr(query, "talker"), name)

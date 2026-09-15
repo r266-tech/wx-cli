@@ -318,7 +318,24 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 	}
 	capabilities = readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists)
 	status["capabilities"] = capabilities
-	status["live_read_ok"] = dbReady && wcdbAvailable
+	liveReadOK := false
+	if dbReady && wcdbAvailable {
+		// A configured key map and an existing dylib are not a successful read.
+		// Probe without setup, refresh, or other support-file writes.
+		wcdbPath, _ := findWCDB()
+		probe := &server{cfg: cfg, wcdbPath: wcdbPath, ok: true}
+		db, err := probe.openDBNoRefresh("session", "session.db")
+		if err == nil {
+			_, err = db.Query("SELECT username FROM SessionTable LIMIT 1")
+			db.Close()
+		}
+		liveReadOK = err == nil
+		if err != nil {
+			setBlocked("live_read_probe_failed", "Inspect doctor and keychain status, then retry after restoring access to the configured account.", appName+" doctor --full", appName+" keychain status")
+		}
+	}
+	status["live_read_ok"] = liveReadOK
+	status["capabilities"] = readOSCapabilities(liveReadOK, wcdbAvailable, cacheIndexExists)
 	status["readiness"] = readiness
 	if len(degradedBy) > 0 {
 		status["degraded_by"] = degradedBy
@@ -345,7 +362,7 @@ func readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists bool) map[strin
 		"tail":            liveRead,
 		"media":           liveRead,
 		"voice_asr":       asrReadyBool(asrStatusData()["wechat_voice_ready"]),
-		"name_resolution": cacheIndexExists,
+		"name_resolution": liveRead,
 	}
 }
 
