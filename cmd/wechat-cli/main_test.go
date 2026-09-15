@@ -524,7 +524,7 @@ func TestToolSchemaExposesMutability(t *testing.T) {
 		t.Fatalf("chat_timeline mutability = %#v", timeline)
 	}
 	search := toolDefByName("search")
-	if !search.ReadOnly || search.LocalWrite || search.LocalWriteMode != "none" || search.StrictReadOnlyBehavior != "same" {
+	if !search.ReadOnly || !search.LocalWrite || search.LocalWriteMode != "possible" || search.StrictReadOnlyBehavior != "allowed_without_writes" {
 		t.Fatalf("search mutability = %#v", search)
 	}
 	export := toolDefByName("export_messages")
@@ -533,15 +533,15 @@ func TestToolSchemaExposesMutability(t *testing.T) {
 	}
 }
 
-func TestReadOSCapabilitiesSeparateLiveReadFromNameResolution(t *testing.T) {
+func TestReadOSCapabilitiesAllowLiveNameResolutionWithoutCache(t *testing.T) {
 	caps := readOSCapabilities(true, true, false)
 	for _, key := range []string{"search", "sessions", "timeline", "context", "tail", "media"} {
 		if !caps[key] {
 			t.Fatalf("capability %s = false in live-read ready caps: %#v", key, caps)
 		}
 	}
-	if caps["name_resolution"] {
-		t.Fatalf("name_resolution should stay false without metadata index: %#v", caps)
+	if !caps["name_resolution"] {
+		t.Fatalf("live name resolution should work without metadata index: %#v", caps)
 	}
 }
 

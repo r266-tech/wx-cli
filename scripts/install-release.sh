@@ -7,6 +7,7 @@ ASSET="${WECHAT_CLI_RELEASE_ASSET:-wechat-cli-latest-darwin-arm64.zip}"
 KEEP_DOWNLOAD="${WECHAT_CLI_KEEP_DOWNLOAD:-0}"
 JSON="${WECHAT_CLI_INSTALL_JSON:-0}"
 ALLOW_UNSIGNED="${WECHAT_CLI_ALLOW_UNSIGNED:-0}"
+ALLOW_PRERELEASE=0
 MODE="install"
 DRY_RUN=0
 CLEANUP_DIR=""
@@ -25,6 +26,7 @@ Usage:
   curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [--with-asr] [installer args...]
   ./scripts/install-release.sh --all [--json]   # install + first key bootstrap
+  ./scripts/install-release.sh --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease
 
 Environment:
   WECHAT_CLI_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-cli-releases.
@@ -168,6 +170,10 @@ parse_args() {
         ALLOW_UNSIGNED=1
         shift
         ;;
+      --allow-prerelease)
+        ALLOW_PRERELEASE=1
+        shift
+        ;;
       --update)
         MODE="update"
         INSTALL_ARGS+=(--update)
@@ -216,6 +222,11 @@ parse_args() {
 
 main() {
   parse_args "$@"
+
+  if [[ "$ALLOW_PRERELEASE" == "1" ]]; then
+    [[ "$TAG" != "latest" && "$TAG" == v[0-9]*-* ]] || fail "--allow-prerelease requires an explicit prerelease --tag."
+    say "Installing an explicitly selected preview; Apple notarization may be unavailable. Checksum and manifest verification remain required."
+  fi
 
   [[ "$(uname -s)" == "Darwin" ]] || fail "this installer is for macOS; use scripts/install-release.ps1 on Windows."
   [[ "$(uname -m)" == "arm64" ]] || fail "this release installer supports macOS arm64 only."
@@ -269,7 +280,7 @@ main() {
   fi
 
   # Embedded dependency-free verifier runs before any installer from the zip.
-  python3 - "$zip" "$extract" "${TAG#v}" <<'VERIFY_RELEASE_PY'
+  python3 - "$zip" "$extract" "${TAG#v}" "$ALLOW_PRERELEASE" <<'VERIFY_RELEASE_PY'
 """Standalone bootstrap verifier. Kept dependency-free for embedding in installers."""
 import hashlib
 import json
@@ -280,7 +291,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
-def verify_and_extract(archive, destination, expected_version):
+def verify_and_extract(archive, destination, expected_version, allow_prerelease=False):
     dest=Path(destination)
     with zipfile.ZipFile(archive) as z:
         infos=z.infolist()
@@ -297,7 +308,12 @@ def verify_and_extract(archive, destination, expected_version):
         if d.get('schema_version')!=2 or d.get('source_repository')!='r266-tech/wx-cli':raise ValueError('manifest schema/source mismatch')
         if d.get('version')!=expected_version or d.get('platform_arch')!='darwin-arm64':raise ValueError('release version/platform mismatch')
         if not re.fullmatch('[0-9a-f]{40}',d.get('commit','')):raise ValueError('invalid source commit')
-        if d.get('channel')!='stable' or d.get('signing_mode')!='developer_id' or d.get('notarization_status')!='accepted':raise ValueError('release is not a verified stable package')
+        preview = allow_prerelease in (True, '1', 'true')
+        stable = d.get('channel')=='stable' and d.get('signing_mode')=='developer_id' and d.get('notarization_status')=='accepted'
+        candidate = (preview and re.fullmatch(r'\d+\.\d+\.\d+-[0-9A-Za-z.-]+', expected_version)
+                     and d.get('channel')=='candidate' and d.get('signing_mode') in ('adhoc','developer_id')
+                     and d.get('notarization_status') in ('not_configured','accepted'))
+        if not (stable or candidate):raise ValueError('release is not a verified stable package; preview requires an explicit prerelease tag and --allow-prerelease')
         files={i.filename[len(prefix):] for i in infos if not i.is_dir()}-{'release-manifest.json'}
         if files!=set(d['artifacts']):raise ValueError('manifest file set mismatch')
         for name,expected in d['artifacts'].items():

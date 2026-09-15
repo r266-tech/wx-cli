@@ -8,7 +8,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 
-def verify_and_extract(archive, destination, expected_version):
+def verify_and_extract(archive, destination, expected_version, allow_prerelease=False):
     dest=Path(destination)
     with zipfile.ZipFile(archive) as z:
         infos=z.infolist()
@@ -25,7 +25,12 @@ def verify_and_extract(archive, destination, expected_version):
         if d.get('schema_version')!=2 or d.get('source_repository')!='r266-tech/wx-cli':raise ValueError('manifest schema/source mismatch')
         if d.get('version')!=expected_version or d.get('platform_arch')!='darwin-arm64':raise ValueError('release version/platform mismatch')
         if not re.fullmatch('[0-9a-f]{40}',d.get('commit','')):raise ValueError('invalid source commit')
-        if d.get('channel')!='stable' or d.get('signing_mode')!='developer_id' or d.get('notarization_status')!='accepted':raise ValueError('release is not a verified stable package')
+        preview = allow_prerelease in (True, '1', 'true')
+        stable = d.get('channel')=='stable' and d.get('signing_mode')=='developer_id' and d.get('notarization_status')=='accepted'
+        candidate = (preview and re.fullmatch(r'\d+\.\d+\.\d+-[0-9A-Za-z.-]+', expected_version)
+                     and d.get('channel')=='candidate' and d.get('signing_mode') in ('adhoc','developer_id')
+                     and d.get('notarization_status') in ('not_configured','accepted'))
+        if not (stable or candidate):raise ValueError('release is not a verified stable package; preview requires an explicit prerelease tag and --allow-prerelease')
         files={i.filename[len(prefix):] for i in infos if not i.is_dir()}-{'release-manifest.json'}
         if files!=set(d['artifacts']):raise ValueError('manifest file set mismatch')
         for name,expected in d['artifacts'].items():

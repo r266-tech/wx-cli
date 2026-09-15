@@ -14,6 +14,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/r266-tech/wx-cli/v2/internal/diagnostics"
 )
 
 // FindBinary locates the wxkey CLI. Resolution order:
@@ -127,7 +129,7 @@ func RunImageKey(root string) (*ImageKeyResult, string, error) {
 	cmd.Stderr = &stderr
 	stdout, runErr := cmd.Output()
 	if runErr != nil {
-		return nil, stderr.String(), fmt.Errorf("wxkey image-key failed: %w (stderr: %s)", runErr, stderr.String())
+		return nil, diagnostics.Redact(stderr.String()), fmt.Errorf("wxkey image-key failed: %w (stderr: %s)", runErr, diagnostics.Redact(stderr.String()))
 	}
 	payload := stdout
 	if i := bytes.IndexByte(payload, '{'); i > 0 {
@@ -135,12 +137,12 @@ func RunImageKey(root string) (*ImageKeyResult, string, error) {
 	}
 	var res ImageKeyCommandResult
 	if err := json.Unmarshal(payload, &res); err != nil {
-		return nil, stderr.String(), fmt.Errorf("parse wxkey image-key output: %w (stdout %d bytes)", err, len(stdout))
+		return nil, diagnostics.Redact(stderr.String()), fmt.Errorf("parse wxkey image-key output: %w (stdout %d bytes)", err, len(stdout))
 	}
 	if res.ImageKey == nil || res.ImageKey.Key == "" {
-		return nil, stderr.String(), fmt.Errorf("wxkey image-key completed without image_key")
+		return nil, diagnostics.Redact(stderr.String()), fmt.Errorf("wxkey image-key completed without image_key")
 	}
-	return res.ImageKey, stderr.String(), nil
+	return res.ImageKey, diagnostics.Redact(stderr.String()), nil
 }
 
 func runSetupExternal() (*SetupResult, string, error) {
@@ -153,7 +155,7 @@ func runSetupExternal() (*SetupResult, string, error) {
 	cmd.Stderr = &stderr
 	stdout, runErr := cmd.Output()
 	if runErr != nil {
-		return nil, stderr.String(), fmt.Errorf("wxkey setup failed: %w (stderr: %s)", runErr, stderr.String())
+		return nil, diagnostics.Redact(stderr.String()), fmt.Errorf("wxkey setup failed: %w (stderr: %s)", runErr, diagnostics.Redact(stderr.String()))
 	}
 	// Elevated wxkey children can still write progress or sudo diagnostics ahead
 	// of the JSON. Strip everything before the first '{' so the JSON object
@@ -167,11 +169,11 @@ func runSetupExternal() (*SetupResult, string, error) {
 		// stdout contains key_hex on the success path; never echo it back through
 		// an error message that may surface to LLM clients. Diagnose by re-running
 		// `wxkey setup` directly in a terminal.
-		return nil, stderr.String(), fmt.Errorf("parse wxkey setup output: %w (stdout %d bytes; rerun `wxkey setup` directly to inspect)", err, len(stdout))
+		return nil, diagnostics.Redact(stderr.String()), fmt.Errorf("parse wxkey setup output: %w (stdout %d bytes; rerun `wxkey setup` directly to inspect)", err, len(stdout))
 	}
 	res.Keys = make(map[string]string, len(res.Results))
 	for _, r := range res.Results {
 		res.Keys[r.SaltHex] = r.KeyHex
 	}
-	return &res, stderr.String(), nil
+	return &res, diagnostics.Redact(stderr.String()), nil
 }
