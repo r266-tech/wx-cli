@@ -19,6 +19,16 @@ WeChat 4.x.
 
 Prefer release bootstrap or latest release zip over a source clone.
 
+The current macOS preview is `v2.0.1-rc.5` in `r266-tech/wx-cli`:
+
+```bash
+curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.5/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease
+```
+
+This explicit preview uses ad-hoc signing and is not Apple-notarized. Hash and
+manifest verification still apply. Keep previews separate from stable updates.
+For an existing preview use `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease`.
+
 Human-friendly macOS:
 
 ```bash
@@ -117,8 +127,8 @@ wechat-cli update
 wechat-cli update
 ```
 
-`wechat-cli update` downloads the latest GitHub release zip, verifies sha256
-when the checksum asset is present, then runs the bundled installer in update
+`wechat-cli update` downloads the selected GitHub release zip, requires its sha256
+and manifest, then runs the bundled installer in update
 mode. On macOS it waits for completion and returns the installer result inside
 the normal CLI JSON envelope. On Windows it starts a background updater because
 Windows cannot overwrite the running `.exe`; inspect `data.log` if verification
@@ -227,6 +237,9 @@ does not install a launchd watcher by default for the same reason.
   commands perform an internal refresh gate before returning data; use
   `cache status` only to inspect diagnostics and errors.
 - Use `resolve-chat` before commands that accept human names when ambiguity matters.
+- `sessions` and `unread` read ordering, previews, and unread counts from the live
+  session DB, even with a stale metadata cache. `status.live_read_ok` requires an
+  actual readonly database query.
 - Use `contacts --keyword <name>` to read a contact's `labels` (`[{id,name}]`).
   Use `labels` to list label definitions and `contact_count`; use
   `contacts --label <name>` or `contacts --label-id <id>` for the reverse lookup.

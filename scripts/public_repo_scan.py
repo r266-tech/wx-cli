@@ -35,8 +35,8 @@ def scan(root):
         # Source/module URL check is distinct from the deliberately retained releases URL.
         if re.search(r'github\.com/r266-tech/wechat-cli(?:/|["\s]|$)', text):
             errors.append({'path': name, 'rule': 'legacy_source_url'})
-        if ('github.com/r266-tech/' + 'wx-cli/releases/') in text:
-            errors.append({'path': name, 'rule': 'source_used_as_release_endpoint'})
+        # The canonical source repository also hosts explicit macOS previews;
+        # the independent release repository remains the stable asset mirror.
         if ('github.com/r266-tech/' + 'wx-cli-releases') in text:
             errors.append({'path': name, 'rule': 'invalid_release_url'})
     if not (root / 'LICENSE').read_text().startswith('MIT License'):

@@ -86,9 +86,11 @@ func toolLocalWriteMode(name string) string {
 	switch name {
 	case "cache_refresh", "cache_rebuild", "export_messages":
 		return "required"
-	case "digest_source", "archive_create", "keychain_migrate", "keychain_authorize":
+	case "digest_source", "archive_create", "archive_delete", "archive_restore", "keychain_migrate", "keychain_authorize":
 		return "required"
-	case "messages", "chat_timeline", "message_context", "read_events", "media_resources", "search_with_context", "forward_history":
+	case "messages", "chat_timeline", "message_context", "read_events", "media_resources", "search_with_context", "forward_history",
+		"sessions", "unread", "resolve_chat", "contacts", "contact_labels", "group_members", "search", "stats",
+		"favorites", "red_packets", "transfers", "sns_feed", "sns_search", "sns_notifications", "schema", "sql", "chatroom_announcements", "archive_retention":
 		return "possible"
 	default:
 		return "none"
@@ -210,9 +212,6 @@ var hiddenByTool = map[string][]string{
 	},
 	"search_with_context": {
 		"search_mode", "before_messages", "after_messages",
-	},
-	"sessions": {
-		"type_filter",
 	},
 	"contacts": {
 		"groups_only", "friends_only",
@@ -802,7 +801,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "unread",
-		Description: "未读会话列表. metadata cache-backed; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
+		Description: "未读会话列表. live session DB; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
 			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),

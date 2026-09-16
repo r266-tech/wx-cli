@@ -299,19 +299,15 @@ func (s *server) toolResolveChat(a map[string]any) (any, error) {
 	if query == "" {
 		query = getStr(a, "keyword")
 	}
-	db, warnings, err := s.openCacheIndexWithWarnings()
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
 	limit := getInt(a, "limit", 10)
-	cands, err := resolveChatCandidates(db, query, getStr(a, "type_filter"), limit)
+	cands, warnings, source, err := s.chatCandidates(query, getStr(a, "type_filter"), limit)
 	if err != nil {
 		return nil, err
 	}
 	out := map[string]any{
 		"query":      query,
 		"candidates": cands,
+		"freshness":  map[string]any{"message_source": source},
 	}
 	if len(warnings) > 0 {
 		out["warnings"] = warnings

@@ -33,6 +33,7 @@ import (
 	"github.com/klauspost/compress/zstd"
 
 	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/diagnostics"
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 	"github.com/r266-tech/wx-cli/v2/internal/wxkey"
 	"github.com/r266-tech/wx-cli/v2/internal/wxkind"
@@ -172,7 +173,7 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 		return fmt.Errorf("%s; wxkey setup was already attempted recently for this condition", reason)
 	}
 	s.keyRefreshLast[key] = time.Now()
-	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey key setup...\n", appName, reason)
+	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey key setup...\n", appName, diagnostics.Redact(reason))
 	res, stderr, err := runWxkeySetup()
 	if err != nil {
 		return fmt.Errorf("wxkey setup failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WECHAT_CLI_DB_ROOT matches the logged-in account, then retry.", err, stderr)
@@ -201,11 +202,11 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	s.cfg = fresh
 	s.ok = true
 	if len(fresh.Keys) > len(res.Keys) || len(fresh.Keys) > beforeCount {
-		fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d new/seen keys, %d total cached for wxid=%s\n", appName,
-			len(res.Keys), len(fresh.Keys), res.WxID)
+		fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d new/seen keys, %d total cached\n", appName,
+			len(res.Keys), len(fresh.Keys))
 	} else {
-		fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d per-DB keys cached for wxid=%s\n", appName,
-			len(fresh.Keys), res.WxID)
+		fmt.Fprintf(os.Stderr, "[%s] wxkey setup OK — %d per-DB keys cached\n", appName,
+			len(fresh.Keys))
 	}
 	return nil
 }
@@ -285,7 +286,7 @@ func (s *server) refreshImageKeyFromWxkey(reason string, force bool) error {
 		return fmt.Errorf("%s; wxkey image-key was already attempted recently", reason)
 	}
 	s.imageKeyRefreshLast = time.Now()
-	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey image-key setup...\n", appName, reason)
+	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey image-key setup...\n", appName, diagnostics.Redact(reason))
 	img, stderr, err := runWxkeyImageKey(root)
 	if err != nil {
 		return fmt.Errorf("wxkey image-key failed: %w\n%s\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache, keep WeChat logged in, open an image chat, then retry.", err, stderr)
@@ -529,106 +530,6 @@ func main() {
 }
 
 // ──────────────────── tool handlers ────────────────────
-
-func (s *server) toolSessions(a map[string]any) (any, error) {
-	if rows, warnings, ok, err := s.cacheSessions(a); ok || err != nil {
-		return sessionRowsResult(rows, "metadata_cache_sessions", warnings), err
-	}
-	db, err := s.openDB("session", "session.db")
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
-	var where []string
-	var args []any
-	where = append(where, "COALESCE(is_hidden, 0) = 0")
-	if getBool(a, "unread_only") {
-		where = append(where, "unread_count > 0")
-	}
-	typeFilter := getStr(a, "type_filter")
-	if tf := typeFilter; tf != "" && tf != "all" {
-		switch tf {
-		case "group":
-			where = append(where, "username LIKE '%@chatroom'")
-		case "friend", "private":
-			where = append(where, `username NOT LIKE '%@chatroom'
-				AND username NOT LIKE 'gh!_%' ESCAPE '!'
-				AND username NOT LIKE '%@openim'
-				AND username NOT LIKE '%@weclaw'
-				AND username NOT LIKE '%@stranger'`)
-		case "official_account":
-			where = append(where, "username LIKE 'gh!_%' ESCAPE '!'")
-		case "bot":
-			where = append(where, "username LIKE '%@weclaw'")
-		}
-	}
-	if kw := getStr(a, "keyword"); kw != "" {
-		// Cross-db: also include sessions whose talker matches display_name /
-		// nick_name / remark / alias in contact.db (fuzzy, case+space insensitive).
-		matched := s.findUsernamesByFuzzyName(kw)
-		clauses := []string{"username LIKE ? COLLATE NOCASE", "summary LIKE ? COLLATE NOCASE"}
-		like := "%" + kw + "%"
-		args = append(args, like, like)
-		if len(matched) > 0 {
-			ph := make([]string, len(matched))
-			for i, u := range matched {
-				ph[i] = "?"
-				args = append(args, u)
-			}
-			clauses = append(clauses, fmt.Sprintf("username IN (%s)", strings.Join(ph, ",")))
-		}
-		where = append(where, "("+strings.Join(clauses, " OR ")+")")
-	}
-	query := fmt.Sprintf(`SELECT username, unread_count, summary,
-		last_timestamp, sort_timestamp,
-		last_msg_sender AS last_sender_wxid, last_sender_display_name,
-		last_msg_type, last_msg_sub_type
-		FROM SessionTable
-		WHERE %s
-		ORDER BY sort_timestamp DESC, username DESC
-		LIMIT ? OFFSET ?`, strings.Join(where, " AND "))
-	rows, err := collectSessionPage(getInt(a, "limit", 50), getInt(a, "offset", 0), typeFilter, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
-		queryArgs := append(append([]any(nil), args...), fetchLimit, scanOffset)
-		return db.Query(query, queryArgs...)
-	})
-	if err != nil {
-		return nil, err
-	}
-	s.attachDisplayNames(rows, [2]string{"username", "display_name"})
-	for _, r := range rows {
-		bk, _ := r["last_msg_type"].(int64)
-		st, _ := r["last_msg_sub_type"].(int64)
-		r["last_msg_kind_name"] = wxkind.Resolve(int32(bk), int32(st))
-		// Aggregator sessions (brandsessionholder / brandservicesessionholder)
-		// wrap the real sender in "_$_CUSTOM_USERNAME_PREFIX_$_<aggId>:<realId>".
-		// The aggId is UI-internal noise; keep only the real wxid / gh_ id.
-		if v, ok := r["last_sender_wxid"].(string); ok {
-			r["last_sender_wxid"] = stripAggSenderPrefix(v)
-		}
-		for _, k := range []string{"last_sender_wxid", "last_sender_display_name"} {
-			if v, ok := r[k].(string); ok && v == "" {
-				delete(r, k)
-			}
-		}
-	}
-	return sessionRowsResult(rows, "live_session_db", nil), nil
-}
-
-func sessionRowsResult(rows []wcdb.Row, source string, warnings []string) cliRowsResult {
-	status := "ready"
-	if len(warnings) > 0 {
-		status = "degraded"
-	}
-	return cliRowsResult{
-		Rows: rows,
-		Freshness: compactMap(map[string]any{
-			"message_source":        source,
-			"metadata_cache_status": status,
-			"metadata_cache_role":   "session ordering, unread counts, and display names",
-		}),
-		Warnings: warnings,
-	}
-}
 
 const aggSenderPrefix = "_$_CUSTOM_USERNAME_PREFIX_$_"
 
@@ -1721,6 +1622,11 @@ func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 		"text":   refText,
 	}
 	if id := agentQuoteID(refer); len(id) > 0 {
+		// WeChat sometimes stores a group member in chatusr. The quoted
+		// message belongs to the enclosing conversation, not that member's DM.
+		if talker := rowString(r, "talker"); talker != "" {
+			id["talker"] = talker
+		}
 		quote["id"] = id
 	}
 	if ts, ok := integerArgValue(refer["createtime"]); ok && ts != 0 {
@@ -1753,8 +1659,13 @@ func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 		attachAgentStructuredPayloads(quote, refRow, sourceIndex)
 		attachAgentReferencedMediaRefs(quote, refRow)
 	}
-	if src := lookupAgentSourceMessage(sourceIndex, stringMapValue(refer, "chatusr"), 0, stringMapValue(refer, "svrid"), 0); src != nil {
+	if src := lookupAgentSourceMessage(sourceIndex, rowString(r, "talker"), 0, stringMapValue(refer, "svrid"), 0); src != nil && (rowString(r, "talker") == "" || rowString(src, "talker") == rowString(r, "talker")) {
 		attachAgentVisiblePayloadFromSource(quote, src)
+		if refSender == "" || looksLikeRawChatID(refSender) {
+			if sender := agentMessageSender(src); sender != "" {
+				quote["sender"] = sender
+			}
+		}
 	}
 	pruneResolvedMediaWarnings(quote)
 	return compactMap(quote)
@@ -5863,12 +5774,7 @@ func (s *server) resolveLooseChatArg(a map[string]any) (string, error) {
 	if raw == "" || looksLikeRawChatID(raw) {
 		return raw, nil
 	}
-	db, err := s.openCacheIndex(false)
-	if err != nil {
-		return "", fmt.Errorf("chat %q requires cache index for display-name resolution; run `wechat-cli cache refresh` first or pass raw talker/wxid", raw)
-	}
-	defer db.Close()
-	return resolveTalkerForCache(db, map[string]any{"chat": raw}, true)
+	return s.resolveLiveChat(raw, getStr(a, "type_filter"))
 }
 
 func (s *server) resolveLooseSenderArg(a map[string]any) (string, error) {
@@ -6239,19 +6145,11 @@ func (s *server) toolGroupMembers(a map[string]any) (any, error) {
 		return nil, fmt.Errorf("chatroom_id or chat is required")
 	}
 	if !looksLikeRawChatID(target) {
-		if cdb, err := s.openCacheIndex(false); err == nil {
-			cp := map[string]any{"chat": target, "type_filter": "group"}
-			resolved, rerr := resolveTalkerForCache(cdb, cp, true)
-			cdb.Close()
-			if rerr != nil {
-				return nil, rerr
-			}
-			target = resolved
-		} else if errors.Is(err, errCacheMissing) {
-			return nil, fmt.Errorf("chat %q requires cache index for group-name resolution; run `wechat-cli cache refresh` first or pass raw chatroom_id", target)
-		} else {
+		resolved, err := s.resolveLiveChat(target, "group")
+		if err != nil {
 			return nil, err
 		}
+		target = resolved
 	}
 	db, err := s.openDB("contact", "contact.db")
 	if err != nil {
@@ -7044,11 +6942,7 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 	}()
 	talker := getStr(a, "talker")
 	if talker == "" && getStr(a, "chat") != "" {
-		cdb, err := openCache()
-		if err != nil {
-			return nil, fmt.Errorf("chat filter requires cache index; run `wechat-cli cache refresh` first: %w", err)
-		}
-		resolved, err := resolveTalkerForCache(cdb, a, true)
+		resolved, err := s.resolveLooseChatArg(a)
 		if err != nil {
 			return nil, err
 		}

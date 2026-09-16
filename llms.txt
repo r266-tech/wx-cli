@@ -10,6 +10,7 @@ Do not use for:
 - sending messages, controlling the WeChat UI, Accessibility automation, Official Account publishing, Mini Program devtools, WeCom bots, or reply bots
 
 Install:
+- Current macOS preview: `curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.5/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease`. It is ad-hoc signed, not Apple-notarized, and requires explicit selection. Checksums and the manifest are verified.
 - macOS:
   1. `curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh`
   2. `~/.local/share/wechat-cli/wxkey bootstrap`
@@ -29,12 +30,14 @@ Install:
 - If `wechat-cli --help` immediately prints `zsh: killed`, reinstall/update with the latest release bootstrap. The macOS installer uses temporary files, ad-hoc codesign, and atomic rename so updates do not in-place overwrite the running Mach-O.
 
 Update:
+- Preview: `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease`.
 - Preferred: `wechat-cli update`
 - macOS waits and returns installer JSON inside the CLI envelope.
 - Windows starts a background updater because the running `.exe` cannot be overwritten; check `data.log` if verification fails.
 - Old installs without `wechat-cli update`: rerun the install one-liner.
 
 Runtime:
+- Sessions and unread counts come from the live session DB, not metadata cache. `status.live_read_ok` requires an actual database query.
 - Binary: `wechat-cli` / `wechat-cli.exe`
 - macOS install dir: `~/.local/share/wechat-cli`
 - Windows install dir: `%LOCALAPPDATA%\wechat-cli`
