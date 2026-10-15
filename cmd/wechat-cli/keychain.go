@@ -83,47 +83,30 @@ func (s *server) toolKeychainMigrate(a map[string]any) (any, error) {
 	if !keystore.Available() {
 		return nil, fmt.Errorf("macOS Keychain runtime store is unavailable on %s", runtime.GOOS)
 	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	if cfg.KeyStore == "keychain" {
-		return map[string]any{"status": "already_migrated", "store": "keychain"}, nil
-	}
-	if len(cfg.Keys) == 0 {
-		return nil, fmt.Errorf("legacy config has no runtime keys to migrate")
-	}
 	backupDir, err := appStateDir()
 	if err != nil {
 		return nil, err
 	}
-	backupPath := filepath.Join(backupDir, "keychain-migration", time.Now().Format("20060102-150405")+"-config.json")
-	oldBytes, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	if err := atomicPrivateWrite(backupPath, append(oldBytes, '\n')); err != nil {
-		return nil, err
-	}
-	migrated, err := config.MigrateToKeychain(cfg)
+	backupPath := filepath.Join(backupDir, "keychain-migration", time.Now().Format("20060102-150405.000000000")+"-config.json")
+	result, err := config.MigratePersistentToKeychain(func(cfg *config.Config) error {
+		oldBytes, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return err
+		}
+		return atomicPrivateWrite(backupPath, append(oldBytes, '\n'))
+	})
 	if err != nil {
 		return nil, fmt.Errorf("keychain migration failed: %w", err)
 	}
-	if err := config.Save(migrated); err != nil {
-		_ = config.Save(cfg)
-		return nil, fmt.Errorf("keychain migration config update failed; restored legacy config: %w", err)
-	}
-	verified, err := config.Load()
-	if err != nil || !verified.Ready() || verified.KeyStore != "keychain" {
-		_ = config.Save(cfg)
-		return nil, fmt.Errorf("keychain migration verification failed; restored legacy config")
+	if !result.Migrated {
+		return map[string]any{"status": "already_migrated", "store": "keychain"}, nil
 	}
 	return map[string]any{
 		"status":        "migrated",
 		"store":         "keychain",
 		"backup":        backupPath,
-		"key_count":     len(cfg.Keys),
-		"key_reference": migrated.KeyStoreRef,
+		"key_count":     result.KeyCount,
+		"key_reference": result.Reference,
 	}, nil
 }
 

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"github.com/r266-tech/wx-cli/v2/internal/keystore"
@@ -149,8 +151,17 @@ func MigrateToKeychain(c *Config) (*Config, error) {
 	if err := runtimeKeySave(record); err != nil {
 		return nil, err
 	}
-	if _, err := runtimeKeyLoad(c.DBRoot, c.Wxid); err != nil {
+	verified, err := runtimeKeyLoad(c.DBRoot, c.Wxid)
+	if err != nil {
 		return nil, err
+	}
+	if verified == nil {
+		return nil, errors.New("keychain migration verification failed")
+	}
+	verifiedCopy := *verified
+	verifiedCopy.UpdatedAt = ""
+	if !reflect.DeepEqual(verifiedCopy, record) {
+		return nil, errors.New("keychain migration verification failed")
 	}
 	copy := *c
 	copy.Keys = nil
@@ -162,6 +173,56 @@ func MigrateToKeychain(c *Config) (*Config, error) {
 	copy.KeyStoreRef = keystore.Account(c.DBRoot, c.Wxid)
 	copy.SchemaVersion = 3
 	return &copy, nil
+}
+
+type MigrationResult struct {
+	Migrated  bool
+	KeyCount  int
+	Reference string
+}
+
+// MigratePersistentToKeychain serializes backup, Keychain verification and the
+// config replacement with normal key refreshes. backup must not reenter Save
+// or Update. A failed replacement leaves the original plaintext config intact.
+func MigratePersistentToKeychain(backup func(*Config) error) (MigrationResult, error) {
+	var result MigrationResult
+	if backup == nil {
+		return result, errors.New("protected config backup callback is required")
+	}
+	p, err := Path()
+	if err != nil {
+		return result, err
+	}
+	err = withConfigWriteLock(p, func(root *os.Root, base string) error {
+		cfg, err := loadConfigFromRoot(root, base)
+		if err != nil {
+			return err
+		}
+		applyEnvOverrides(cfg)
+		if err := hydrateRuntimeKeys(cfg); err != nil {
+			return err
+		}
+		if cfg.KeyStore == "keychain" {
+			result = MigrationResult{KeyCount: len(cfg.Keys), Reference: cfg.KeyStoreRef}
+			return nil
+		}
+		if !cfg.Ready() {
+			return errors.New("legacy config has no runtime keys to migrate")
+		}
+		if err := backup(cfg); err != nil {
+			return err
+		}
+		migrated, err := MigrateToKeychain(cfg)
+		if err != nil {
+			return err
+		}
+		if err := saveConfigToRoot(root, base, migrated); err != nil {
+			return err
+		}
+		result = MigrationResult{Migrated: true, KeyCount: len(cfg.Keys), Reference: migrated.KeyStoreRef}
+		return nil
+	})
+	return result, err
 }
 
 func Save(c *Config) error {
@@ -320,8 +381,13 @@ func loadConfigFromRoot(root *os.Root, base string) (*Config, error) {
 		return nil, errors.New("config path changed during validation")
 	}
 	var cfg Config
-	if err := json.NewDecoder(file).Decode(&cfg); err != nil {
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&cfg); err != nil {
 		return nil, err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, errors.New("config contains trailing JSON data")
 	}
 	return &cfg, nil
 }
@@ -597,5 +663,10 @@ func hydrateRuntimeKeysWith(c *Config, load func(string, string) (*keystore.Reco
 	c.ImageKey = record.ImageKey
 	c.ImageXORKey = record.ImageXORKey
 	c.KeyEpoch = record.KeyEpoch
+	// Runtime image-key overrides have the same precedence with Keychain
+	// storage as with legacy plaintext storage.
+	if key := firstEnv("WECHAT_CLI_IMAGE_KEY", "WX_MCP_IMAGE_KEY"); key != "" {
+		c.ImageKey = key
+	}
 	return nil
 }

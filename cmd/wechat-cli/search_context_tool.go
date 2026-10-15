@@ -64,6 +64,12 @@ func (s *server) toolSearchWithContext(a map[string]any) (any, error) {
 					"include_debug":       includeDebug,
 					"display_order":       "asc",
 				}
+				if serverID := rowString(row, "server_id_str"); serverID != "" {
+					ctxArgs["server_id_str"] = serverID
+				}
+				if token := rowString(row, "message_token"); token != "" {
+					ctxArgs["message_token"] = token
+				}
 				ctx, err := s.toolMessageContext(ctxArgs)
 				if err != nil {
 					hit["context_error"] = err.Error()

@@ -119,8 +119,8 @@ var conciseToolDescriptions = map[string]string{
 	"read_os":             "Agent 入口: 返回能力矩阵、推荐工作流、质量验收和本机 readiness; 不读取大量聊天正文。",
 	"messages":            "底层单会话消息读取。普通 agent 优先用 chat_timeline; 需要底层过滤或 raw view 时再用。",
 	"chat_timeline":       "普通读聊天首选入口: 解析 chat, live 读取消息, 返回 query/freshness/messages, 默认按聊天顺序展示最近窗口。",
-	"message_context":     "以 local_id/server_id 为锚点展开前后文; 返回与 timeline 同形的 messages, 附 context_role。",
-	"read_events":         "只读增量观察: chat 模式返回 message events, 无 chat 时返回 session/unread events; cursor 可原样续传。",
+	"message_context":     "以 message_token 或 local_id/server_id 为锚点展开前后文; 返回与 timeline 同形的 messages, 附 context_role。",
+	"read_events":         "只读增量观察: chat 模式返回 message events; sessions 模式对比轮询快照, 观察未读数等净变化; cursor 原样续传, 不代表完整事件日志。",
 	"media_resources":     "按 chat/local_id/server_id 定位图片、视频、文件等本机资源; 默认只暴露 agent 可直接读取的 path 或 concise warning。",
 	"search":              "跨会话或单会话关键词搜索; 走微信 live FTS, 返回可继续 context 的 talker/local_id。",
 	"search_with_context": "关键词搜索并展开命中上下文; 适合直接回答“这件事前后发生了什么”。",
@@ -371,7 +371,7 @@ var toolDefs = []toolDef{
 	{
 		Name: "messages",
 		Description: "会话消息, 默认直接读取实时微信消息 DB, 不缓存聊天正文. talker 可传 wxid/xxx@chatroom; chat 可传昵称/备注/群名让 wechat-cli 用 metadata cache 自动解析. " +
-			"view=agent 返回给 agent 直接消费的 query/freshness/messages envelope; query 含 returned/limit/has_more 与 cursor.next_before_message/next_after_message, 用于稳定分页. messages[] 是低噪声 timeline 行: id(local_id/server_id_str/talker) / time / create_time(unix秒) / time_iso / sender / sender_wxid / sender_group_nickname / sender_contact_display / is_from_me / kind / text / warnings; 群聊 sender 优先使用群昵称, " +
+			"view=agent 返回给 agent 直接消费的 query/freshness/messages envelope; query 含 returned/limit/has_more 与 cursor.next_before_message_token/next_after_message_token, 用于跨分片稳定分页, 包括无 server ID 的消息. token 为绑定账号、会话和原消息位置的不透明字符串; 旧 local_id/server_id 参数仍兼容. messages[] 是低噪声 timeline 行: id(message_token/local_id/server_id_str/talker) / time / create_time(unix秒) / time_iso / sender / sender_wxid / sender_group_nickname / sender_contact_display / is_from_me / kind / text / warnings; 群聊 sender 优先使用群昵称, " +
 			"并为非文本消息提供 display-ready 结构: images / videos / files / link / music / miniprogram / forward_chat / quote / transfer / red_packet / location / card / voice / video / sticker / solitaire / announcement / pat. " +
 			"默认遵循微信 UI 可见语义: 图片/视频/文件给 agent 可直接读取的本机 path, 语音默认优先用 faster-whisper large-v3 返回本地 ASR transcript, raw SILK、不可读 .dat、CDN/aeskey、协议码和 raw XML 下沉到 debug/full/media_resources; 引用消息会扁平到 quote 并复用原消息可见 payload; 合并转发 item 使用 source_id 统一关联原消息, 媒体无法解析时给明确 warnings; 链接直接给 title/url/source/thumb_url. " +
 			"fields=lite (默认) 返回: local_id / server_id / server_id_str / create_time / create_time_human / " +
@@ -397,6 +397,8 @@ var toolDefs = []toolDef{
 			"since_time":                   strProp("after 的小助手别名: 从这个本地时间之后读"),
 			"since":                        strProp("since_time 的别名"),
 			"before":                       strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"before_message_token":         strProp("优先使用 query.cursor.next_before_message_token 原样续传; 跨分片且无 server ID 时仍可精确定位"),
+			"after_message_token":          strProp("优先使用 query.cursor.next_after_message_token 原样续传; 返回该锚点之后的新消息"),
 			"before_message":               intProp("锚点 local_id; 返回该消息之前更旧的消息"),
 			"after_message":                intProp("锚点 local_id; 返回该消息之后更新的消息"),
 			"since_local_id":               intProp("after_message 的小助手别名: 从这个 local_id 之后读"),
@@ -432,7 +434,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "chat_timeline",
-		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; 翻旧消息优先复用 query.cursor.next_before_message, 避免实时新增消息使 offset 漂移; messages 是低噪声 agent 行, 每条有稳定 id、time/create_time/time_iso、sender_wxid/is_from_me、sender_group_nickname/sender_contact_display (群聊 sender 优先群昵称)、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
+		Description: "面向 agent 展示/总结的高层聊天时间线工具, 是普通查消息的首选入口. 自动解析 chat, live 读取最近消息, 默认 order=desc + display_order=asc 展示最近窗口的聊天顺序. 返回对象包含 query / freshness / messages; 翻旧消息复用 query.cursor.next_before_message_token 作为 before_message_token (兼容旧 server_id/local_id 参数), 避免实时新增消息使 offset 漂移; messages 是低噪声 agent 行, 每条有稳定 id、time/create_time/time_iso、sender_wxid/is_from_me、sender_group_nickname/sender_contact_display (群聊 sender 优先群昵称)、display-ready 非文本结构和轻量 warnings, 默认隐藏调试噪音.",
 		InputSchema: jsonSchema(props{
 			"talker":                       strProp("会话对象 (wxid 或 xxx@chatroom)"),
 			"chat":                         strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
@@ -442,6 +444,8 @@ var toolDefs = []toolDef{
 			"since_time":                   strProp("after 的小助手别名: 从这个本地时间之后读"),
 			"since":                        strProp("since_time 的别名"),
 			"before":                       strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"before_message_token":         strProp("优先使用 query.cursor.next_before_message_token 原样续传; 跨分片且无 server ID 时仍可精确定位"),
+			"after_message_token":          strProp("优先使用 query.cursor.next_after_message_token 原样续传; 返回该锚点之后的新消息"),
 			"before_message":               intProp("锚点 local_id; 返回该消息之前更旧的消息"),
 			"after_message":                intProp("锚点 local_id; 返回该消息之后更新的消息"),
 			"since_local_id":               intProp("after_message 的小助手别名: 从这个 local_id 之后读"),
@@ -477,12 +481,13 @@ var toolDefs = []toolDef{
 	{
 		Name: "message_context",
 		Description: "以一条已知消息为锚点向前/向后展开上下文. 这是 search 结果、timeline 某条消息、用户指定 local_id/server_id 后继续读前后文的首选入口. " +
-			"输入 chat/talker + local_id 或 server_id/server_id_str; 返回 query/freshness/messages, messages 与 timeline agent 行同形, 额外带 context_role=before/anchor/after. " +
+			"输入 chat/talker + message_token (优先复用 id.message_token), 或兼容 local_id/server_id/server_id_str; token 与旧 ID 同传必须一致; 返回 query/freshness/messages, messages 与 timeline agent 行同形, 额外带 context_role=before/anchor/after. " +
 			"默认 before_count=20、after_count=20、include_anchor=true、display_order=asc, 用 sort_seq/local_id 定位, 比只按时间更接近微信 UI 顺序. " +
 			"include_media_paths 默认 true; debug/include_debug 仅用于诊断媒体/解析 warning.",
 		InputSchema: jsonSchema(props{
 			"talker":                strProp("会话对象 (wxid 或 xxx@chatroom)"),
 			"chat":                  strProp("会话显示名/备注/alias/群名; talker 为空时自动解析"),
+			"message_token":         strProp("优先使用消息 id.message_token 原样定位; 账号/会话错配或原锚点失效时明确报错"),
 			"local_id":              intProp("锚点消息 local_id"),
 			"message_local_id":      intProp("local_id 的别名"),
 			"around_local_id":       intProp("local_id 的别名"),
@@ -507,13 +512,17 @@ var toolDefs = []toolDef{
 	{
 		Name: "read_events",
 		Description: "只读事件观察入口, 用于小助手增量观察微信而不发送、不控制 UI. " +
-			"chat/talker 存在时返回 message events, event.message 与 timeline agent row 同形; 不传 chat 时返回 session/unread events. " +
-			"cursor 可直接传回下一次调用; since_local_id/since_time 用于首次建立游标. CLI 的 tail/watch 支持 --jsonl 一次性输出事件行, --follow 按 poll_interval 轮询.",
+			"chat/talker 存在时返回 message events, event.message 与 timeline agent row 同形; 不传 chat 时对比完整会话快照, 返回新增、更新或移除的 session events, 包括纯未读数和同秒内的状态净变化; 只能观察轮询之间保留下来的净变化, 不是完整事件日志. " +
+			"cursor 原样传回下一次调用; sessions 初次返回最近窗口并为全部扫描会话建立基线 (query.initial_snapshot=true), 扫描不完整时不推进. 会话游标绑定账号和 type_filter/keyword/unread_only; limit/scan_limit可调整, 非零offset不支持. cursor_storage=auto 默认写本机私有快照、strict read-only 自动 inline; inline 长游标可通过 call-json stdin 传入. session change=added/updated/removed, removed 表示离开匹配可见集合; inline 是批次检查点, local 可逐事件续传; 旧游标重试可能重放事件. since_local_id/since_time 用于首次建立游标. CLI 的 tail/watch 支持 --jsonl 与 --follow, 每批追加 type=checkpoint (含空批次), 按 poll_interval 轮询.",
 		InputSchema: jsonSchema(props{
 			"mode":                enumStrProp("auto (默认) / messages / sessions", "auto", "messages", "sessions"),
 			"talker":              strProp("可选: 限定 wxid 或 xxx@chatroom; 存在时观察该会话新消息"),
 			"chat":                strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
-			"cursor":              strProp("上次返回的 cursor; message 形如 local_id:123, session cursor 为不透明的 session:<timestamp>[:tie-break]"),
+			"cursor":              strProp("上次返回的不透明 cursor, 原样续传; messages 优先 msg:v1, sessions 为绑定账号与筛选的快照游标; 兼容旧游标"),
+			"cursor_storage":      enumStrProp("sessions 游标: auto 普通模式使用本机私有快照、strict read-only 使用 inline; local 在 strict 下拒绝; inline 无游标状态文件", "auto", "local", "inline"),
+			"type_filter":         strProp("sessions 会话类型筛选: all/private/group/official_account/folded/bot, 可逗号分隔; 续读时须保持一致"),
+			"keyword":             strProp("sessions 会话关键词筛选; 续读时须保持一致"),
+			"unread_only":         boolProp("sessions 仅观察当前未读会话; 续读时须保持一致, 变为已读会产生 removed"),
 			"since_local_id":      intProp("首次观察某会话时的 local_id 游标; 等价 after_message"),
 			"since_time":          strProp("首次观察时的起始时间 (unix秒 或 2006-01-02, 本地时区)"),
 			"since":               strProp("since_time 的别名"),
@@ -523,11 +532,11 @@ var toolDefs = []toolDef{
 			"sender":              strProp("可选: sender wxid/昵称; 可传 me/self 表示自己"),
 			"from_me":             boolProp("仅返回自己发出的 message events; 等价 sender=me"),
 			"limit":               intPropBounds("返回事件条数 (默认 50, 最大 1000)", 1, 1000),
-			"scan_limit":          intPropBounds("mode=sessions 时内部扫描会话条数 (默认 5000, 最大 5000); 截断时不推进游标并返回 warning", 1, 5000),
+			"scan_limit":          intPropBounds("mode=sessions 时内部扫描会话条数 (默认 5000, 最大 100000); 截断时不推进游标并返回 warning, 可提高此值重试", 1, 100000),
 			"include_media_paths": boolProp("message events 是否补齐图片/视频/文件路径 (默认 true)"),
 			"include_debug":       boolProp("是否附带 debug 节点 (默认 false)"),
 			"debug":               boolProp("include_debug 的别名"),
-			"jsonl":               boolProp("CLI-only: 每个 event 输出一行 JSON"),
+			"jsonl":               boolProp("CLI-only: 每个 event 输出一行 JSON, 每批末尾追加 type=checkpoint"),
 			"follow":              boolProp("CLI-only: 持续轮询输出 JSONL"),
 			"poll_interval":       strProp("CLI-only: follow 轮询间隔, 如 2s; 纯数字按秒"),
 		}, nil),

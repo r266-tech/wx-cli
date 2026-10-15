@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"crypto/md5"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/filelock"
 	"github.com/r266-tech/wx-cli/v2/internal/safefile"
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 	"github.com/r266-tech/wx-cli/v2/internal/wxkind"
@@ -522,17 +524,47 @@ func spawnBackgroundCacheRefresh(force bool, lockPath string) (string, error) {
 		args = append(args, "--force")
 	}
 	cmd := exec.Command(exe, args...)
-	cmd.Env = append(os.Environ(), "WECHAT_CLI_CACHE_LOCK_HELD="+lockPath, "WX_MCP_CACHE_LOCK_HELD="+lockPath)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	configureBackgroundCommand(cmd)
-	if err := cmd.Start(); err != nil {
+	if err := startCacheRefreshHandoff(cmd, lockPath); err != nil {
 		return "", err
 	}
-	if err := cmd.Process.Release(); err != nil {
-		return "", err
-	}
+	// Once Start succeeds the child owns the handoff; a Release failure must
+	// not make the caller remove the running child's lock.
+	_ = cmd.Process.Release()
 	return logPath, nil
+}
+
+func startCacheRefreshHandoff(cmd *exec.Cmd, lockPath string) error {
+	guard, err := filelock.Acquire(lockPath + ".guard")
+	if err != nil {
+		return err
+	}
+	defer guard()
+	owner, err := readCacheRefreshLockOwner(lockPath)
+	if err != nil || owner.Token == "" || owner.PID != os.Getpid() {
+		return fmt.Errorf("cache refresh lock has no transferable owner")
+	}
+	owner.Token = rand.Text()
+	if cmd.Env == nil {
+		cmd.Env = os.Environ()
+	}
+	cmd.Env = append(cmd.Env, "WECHAT_CLI_CACHE_LOCK_HELD="+lockPath, "WX_MCP_CACHE_LOCK_HELD="+lockPath, "WECHAT_CLI_CACHE_LOCK_TOKEN="+owner.Token)
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	// Publish the live child PID before it can claim the token or another
+	// caller can reap the parent lease after the parent exits.
+	owner.PID = cmd.Process.Pid
+	owner.StartedAt = time.Now().Unix()
+	owner.Command = strings.Join(cmd.Args, " ")
+	if err := saveCacheRefreshLockOwner(lockPath, owner); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return err
+	}
+	return nil
 }
 
 func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
@@ -547,68 +579,78 @@ func (s *server) toolCacheRebuild(a map[string]any) (any, error) {
 		return nil, fmt.Errorf("cache refresh already running (lock: %s)", lockPath)
 	}
 	defer unlock()
-	paths, err := s.cachePaths()
-	if err != nil {
-		return nil, err
-	}
-	if err := os.RemoveAll(paths.RootDir); err != nil {
-		return nil, err
-	}
+	// force rebuilds all snapshots and the index with atomic replacements.
+	// Keep the last complete index available until the new build succeeds.
 	return s.refreshCache(true)
 }
 
 func acquireCacheRefreshLock() (func(), bool, string, error) {
-	if held := envFirst("WECHAT_CLI_CACHE_LOCK_HELD", "WX_MCP_CACHE_LOCK_HELD"); held != "" {
-		if held == "1" {
-			return func() {}, true, "", nil
-		}
-		expected, err := expectedCacheRefreshLockDir()
-		if err != nil {
-			return nil, false, "", err
-		}
-		provided, err := filepath.Abs(filepath.Clean(held))
-		if err != nil || !samePath(provided, expected) {
-			return nil, false, provided, fmt.Errorf("refusing inherited cache lock outside managed state: %q", held)
-		}
-		info, err := os.Lstat(expected)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return nil, false, expected, fmt.Errorf("inherited cache lock is not a managed directory: %q", expected)
-		}
-		if err := writeCacheRefreshLockOwner(expected); err != nil {
-			return nil, false, expected, err
-		}
-		return func() { _ = os.RemoveAll(expected) }, true, expected, nil
-	}
 	lockDir, err := expectedCacheRefreshLockDir()
 	if err != nil {
 		return nil, false, "", err
 	}
-	stateDir := filepath.Dir(lockDir)
-	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+	held := envFirst("WECHAT_CLI_CACHE_LOCK_HELD", "WX_MCP_CACHE_LOCK_HELD")
+	if held != "" && held != "1" {
+		provided, err := filepath.Abs(filepath.Clean(held))
+		if err != nil || !samePath(provided, lockDir) {
+			return nil, false, provided, fmt.Errorf("refusing inherited cache lock outside managed state: %q", held)
+		}
+	}
+	guard, err := filelock.Acquire(lockDir + ".guard")
+	if err != nil {
 		return nil, false, lockDir, err
 	}
-	if err := os.Mkdir(lockDir, 0o700); err == nil {
-		if err := writeCacheRefreshLockOwner(lockDir); err != nil {
-			_ = os.RemoveAll(lockDir)
-			return nil, false, lockDir, err
+	defer guard()
+	if held != "" && held != "1" {
+		info, err := os.Lstat(lockDir)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, false, lockDir, fmt.Errorf("inherited cache lock is not a managed directory")
 		}
-		return func() { _ = os.RemoveAll(lockDir) }, true, lockDir, nil
+		owner, err := readCacheRefreshLockOwner(lockDir)
+		token := os.Getenv("WECHAT_CLI_CACHE_LOCK_TOKEN")
+		if err != nil || token == "" || owner.Token != token {
+			return nil, false, lockDir, fmt.Errorf("inherited cache lock ownership changed or is missing")
+		}
+		return claimCacheRefreshLock(lockDir)
+	}
+	if err := os.Mkdir(lockDir, 0o700); err == nil {
+		return claimCacheRefreshLock(lockDir)
 	} else if !errors.Is(err, os.ErrExist) {
 		return nil, false, lockDir, err
 	}
 	if cacheRefreshLockStale(lockDir) {
-		_ = os.RemoveAll(lockDir)
+		if err := os.RemoveAll(lockDir); err != nil {
+			return nil, false, lockDir, err
+		}
 		if err := os.Mkdir(lockDir, 0o700); err == nil {
-			if err := writeCacheRefreshLockOwner(lockDir); err != nil {
-				_ = os.RemoveAll(lockDir)
-				return nil, false, lockDir, err
-			}
-			return func() { _ = os.RemoveAll(lockDir) }, true, lockDir, nil
+			return claimCacheRefreshLock(lockDir)
 		} else if !errors.Is(err, os.ErrExist) {
 			return nil, false, lockDir, err
 		}
 	}
 	return nil, false, lockDir, nil
+}
+
+func claimCacheRefreshLock(lockDir string) (func(), bool, string, error) {
+	token := rand.Text()
+	if err := writeCacheRefreshLockOwnerToken(lockDir, token); err != nil {
+		_ = os.RemoveAll(lockDir)
+		return nil, false, lockDir, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			guard, err := filelock.Acquire(lockDir + ".guard")
+			if err != nil {
+				return
+			}
+			defer guard()
+			owner, err := readCacheRefreshLockOwner(lockDir)
+			if err == nil && owner.Token == token {
+				_ = os.RemoveAll(lockDir)
+			}
+		})
+	}, true, lockDir, nil
 }
 
 func expectedCacheRefreshLockDir() (string, error) {
@@ -625,21 +667,41 @@ type cacheRefreshLockOwner struct {
 	PID       int    `json:"pid"`
 	StartedAt int64  `json:"started_at"`
 	Command   string `json:"command,omitempty"`
+	Token     string `json:"token,omitempty"`
 }
 
 func writeCacheRefreshLockOwner(lockDir string) error {
+	return writeCacheRefreshLockOwnerToken(lockDir, rand.Text())
+}
+
+func writeCacheRefreshLockOwnerToken(lockDir, token string) error {
 	info := cacheRefreshLockOwner{
 		PID:       os.Getpid(),
 		StartedAt: time.Now().Unix(),
+		Token:     token,
 	}
 	if len(os.Args) > 0 {
 		info.Command = strings.Join(os.Args, " ")
 	}
+	return saveCacheRefreshLockOwner(lockDir, info)
+}
+
+func saveCacheRefreshLockOwner(lockDir string, info cacheRefreshLockOwner) error {
 	b, err := json.Marshal(info)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(lockDir, cacheRefreshLockOwnerFile), append(b, '\n'), 0o600)
+	return atomicPrivateWrite(filepath.Join(lockDir, cacheRefreshLockOwnerFile), append(b, '\n'))
+}
+
+func readCacheRefreshLockOwner(lockDir string) (cacheRefreshLockOwner, error) {
+	var owner cacheRefreshLockOwner
+	b, err := os.ReadFile(filepath.Join(lockDir, cacheRefreshLockOwnerFile))
+	if err != nil {
+		return owner, err
+	}
+	err = json.Unmarshal(b, &owner)
+	return owner, err
 }
 
 func cacheRefreshLockStale(lockDir string) bool {
@@ -648,9 +710,6 @@ func cacheRefreshLockStale(lockDir string) bool {
 		return false
 	}
 	age := time.Since(st.ModTime())
-	if age > 2*time.Hour {
-		return true
-	}
 	b, err := os.ReadFile(filepath.Join(lockDir, cacheRefreshLockOwnerFile))
 	if err != nil {
 		return age > 30*time.Second
@@ -939,10 +998,20 @@ func cacheMetaValue(indexPath, key string) string {
 }
 
 func (s *server) buildCacheIndex(paths cachePaths, files []cacheFileMeta) (map[string]int64, []map[string]string, error) {
-	tmp := paths.IndexPath + ".tmp"
-	_ = os.Remove(tmp)
-	_ = os.Remove(tmp + "-wal")
-	_ = os.Remove(tmp + "-shm")
+	f, err := os.CreateTemp(filepath.Dir(paths.IndexPath), ".index-*.sqlite")
+	if err != nil {
+		return nil, nil, err
+	}
+	tmp := f.Name()
+	defer func() {
+		_ = os.Remove(tmp)
+		_ = os.Remove(tmp + "-wal")
+		_ = os.Remove(tmp + "-shm")
+		_ = os.Remove(tmp + "-journal")
+	}()
+	if err := f.Close(); err != nil {
+		return nil, nil, err
+	}
 	db, err := wcdb.OpenPlain(tmp, true)
 	if err != nil {
 		return nil, nil, err
@@ -1207,7 +1276,7 @@ func decorateMessageSearchRows(rows []wcdb.Row) {
 	decorateMessageRows(rows)
 	for _, r := range rows {
 		if c := rowString(r, "content"); c != "" {
-			r["content"] = senderPrefixRe.ReplaceAllString(c, "")
+			r["content"] = stripVerifiedSenderPrefix(c, rowString(r, "sender_wxid"))
 		}
 	}
 }
@@ -1268,11 +1337,18 @@ func exportMessagesView(a map[string]any) (string, error) {
 }
 
 func (s *server) writeLiveExportMessages(a map[string]any, path, format, view string) (int, error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+	switch format {
+	case "jsonl", "markdown", "html":
+	default:
+		return 0, fmt.Errorf("invalid format=%q: jsonl / markdown / html", format)
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".export-*.tmp")
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
+	tmp := f.Name()
+	defer os.Remove(tmp)
 	w := bufio.NewWriterSize(f, 256*1024)
 	totalLimit := getInt(a, "limit", 10000)
 	if totalLimit <= 0 {
@@ -1304,8 +1380,11 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format, view st
 		}
 		batchArgs["limit"] = limit
 		batchArgs["offset"] = baseOffset + written
-		rows, _, err := s.queryLiveMessages(batchArgs, "create_time ASC, local_id ASC")
+		rows, page, err := s.queryLiveMessages(batchArgs, "create_time ASC, local_id ASC")
 		if err != nil {
+			return written, err
+		}
+		if err := requireCompleteMessageSource(page.Warnings); err != nil {
 			return written, err
 		}
 		if len(rows) == 0 {
@@ -1331,7 +1410,10 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format, view st
 				if view == "agent" {
 					payload = agentRow
 				}
-				j, _ := json.Marshal(payload)
+				j, err := json.Marshal(payload)
+				if err != nil {
+					return written, err
+				}
 				if _, err := w.Write(j); err != nil {
 					return written, err
 				}
@@ -1369,7 +1451,25 @@ func (s *server) writeLiveExportMessages(a map[string]any, path, format, view st
 	if err := w.Flush(); err != nil {
 		return written, err
 	}
+	if err := f.Sync(); err != nil {
+		return written, err
+	}
+	if err := f.Close(); err != nil {
+		return written, err
+	}
+	if err := safefile.Replace(tmp, path); err != nil {
+		return written, err
+	}
 	return written, nil
+}
+
+func requireCompleteMessageSource(warnings []string) error {
+	for _, warning := range warnings {
+		if strings.HasPrefix(warning, "message_shard_coverage_partial:") || strings.HasPrefix(warning, "message_shard_unavailable:") {
+			return fmt.Errorf("message source is incomplete; retry after all message shards are readable")
+		}
+	}
+	return nil
 }
 
 func renderAgentMessageMarkdown(m map[string]any) string {

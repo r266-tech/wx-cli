@@ -10,7 +10,7 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from release_lib import sha256
+from release_lib import sha256, verify_acceptance_artifact
 
 
 def digest_message_ids(document, require_messages=False):
@@ -50,6 +50,7 @@ def main():
     a=ap.parse_args();binary=str(Path(a.binary).resolve());env=os.environ.copy();env['WECHAT_CLI_STRICT_READ_ONLY']='1'
     if not 1 <= a.archive_timeout <= 3600:
         ap.error('--archive-timeout must be between 1 and 3600 seconds')
+    manifest=verify_acceptance_artifact(a.archive,binary=binary)
     checks={}
     def call(tool,args=None,writes=False):
         local=env.copy()
@@ -69,6 +70,8 @@ def main():
             checks[name]={'status':'failed','warning_codes':['acceptance_failed']}
         checks[name]['duration_ms']=round((time.monotonic()-before)*1000)
     version=json.loads(subprocess.check_output([binary,'--version']))['data']
+    if (version.get('version'),version.get('commit'))!=(manifest['version'],manifest['commit']):
+        raise ValueError('binary reports a different release identity')
     record('doctor',lambda: bool(call('read_os',{'mode':'doctor'})['doctor']['status']['live_read_ok']) or (_ for _ in ()).throw(ValueError()))
     def keys():
         data=call('keychain_status')

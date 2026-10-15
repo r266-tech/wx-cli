@@ -233,6 +233,10 @@ function Finish {
 }
 
 function Resolve-WechatCli {
+  if ((Test-Path (Join-Path $SourceDir "cmd\wechat-cli\main.go")) -and (Have-Command "go")) {
+    Add-Action "build $AppName.exe from source"
+    return @{ Mode = "build"; Path = $SourceDir }
+  }
   $bin = Join-Path $SourceDir "$AppName.exe"
   if (Test-Path $bin) {
     Add-Action "copy $AppName.exe from source directory"
@@ -242,10 +246,6 @@ function Resolve-WechatCli {
   if (Test-Path $legacyBin) {
     Add-Action "copy legacy $LegacyAppName.exe from source directory"
     return @{ Mode = "copy"; Path = $legacyBin }
-  }
-  if ((Test-Path (Join-Path $SourceDir "cmd\wechat-cli\main.go")) -and (Have-Command "go")) {
-    Add-Action "build $AppName.exe from source"
-    return @{ Mode = "build"; Path = $SourceDir }
   }
   throw "$AppName.exe not found and Go is not available to build it"
 }
@@ -282,25 +282,26 @@ function Confirm-Or-Die {
   }
 }
 
-function Copy-InstallDocs {
+function Copy-InstallDocs([string]$TargetDir = $InstallDir) {
   $docs = @(
     "install.ps1",
     "README.md",
     "AGENTS.md",
     "LICENSE",
     "SECURITY.md",
-    "THIRD_PARTY_NOTICES.md"
+    "THIRD_PARTY_NOTICES.md",
+    "release-manifest.json"
   )
   foreach ($doc in $docs) {
     $src = Join-Path $SourceDir $doc
     if (Test-Path $src) {
-      Copy-Item -LiteralPath $src -Destination (Join-Path $InstallDir $doc) -Force
+      Copy-Item -LiteralPath $src -Destination (Join-Path $TargetDir $doc) -Force
     }
   }
   $guide = Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md"
   if (Test-Path $guide) {
-    New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir "docs") | Out-Null
-    Copy-Item -LiteralPath $guide -Destination (Join-Path $InstallDir "docs\WINDOWS_USER_GUIDE.md") -Force
+    New-Item -ItemType Directory -Force -Path (Join-Path $TargetDir "docs") | Out-Null
+    Copy-Item -LiteralPath $guide -Destination (Join-Path $TargetDir "docs\WINDOWS_USER_GUIDE.md") -Force
   }
   Add-Action "copy installer docs and manifest"
 }
@@ -341,38 +342,86 @@ function Install-Components {
     return
   }
 
-  New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-  Set-Content -LiteralPath (Join-Path $InstallDir $InstallMarker) -Value "name=$AppName" -Encoding ASCII
-  New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-
-  $wx = $components.Wx
-  if ($wx.Mode -eq "build") {
-    Push-Location $wx.Path
-    $oldCgo = $env:CGO_ENABLED
-    try {
-      $env:CGO_ENABLED = "0"
-      Write-Log "CGO_ENABLED=0 go build -o $InstallDir\$AppName.exe ./cmd/wechat-cli"
-      & go build -o (Join-Path $InstallDir "$AppName.exe") ./cmd/wechat-cli 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
-      if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
-    } finally {
-      if ($null -eq $oldCgo) {
-        Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
-      } else {
-        $env:CGO_ENABLED = $oldCgo
+  $transaction = Join-Path (Split-Path -Parent ([IO.Path]::GetFullPath($InstallDir))) (".wechat-cli-stage-" + [Guid]::NewGuid().ToString('N'))
+  $stage = Join-Path $transaction 'new'
+  $backup = Join-Path $transaction 'backup'
+  $attempted = New-Object System.Collections.Generic.List[string]
+  $original = @{}
+  $keepRecovery = $false
+  New-Item -ItemType Directory -Force -Path $stage, $backup | Out-Null
+  try {
+    $wx = $components.Wx
+    if ($wx.Mode -eq "build") {
+      Push-Location $wx.Path
+      $oldCgo = $env:CGO_ENABLED
+      try {
+        $env:CGO_ENABLED = "0"
+        Write-Log "CGO_ENABLED=0 go build -o $stage\$AppName.exe ./cmd/wechat-cli"
+        & go build -o (Join-Path $stage "$AppName.exe") ./cmd/wechat-cli 2>&1 | Tee-Object -FilePath $log -Append | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "go build failed with exit code $LASTEXITCODE" }
+      } finally {
+        if ($null -eq $oldCgo) {
+          Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
+        } else {
+          $env:CGO_ENABLED = $oldCgo
+        }
+        Pop-Location
       }
-      Pop-Location
+    } else {
+      Copy-Item -LiteralPath $wx.Path -Destination (Join-Path $stage "$AppName.exe") -Force
     }
-  } else {
-    Copy-Item -LiteralPath $wx.Path -Destination (Join-Path $InstallDir "$AppName.exe") -Force
-  }
 
-  $dll = $components.Dll
-  $dllName = Split-Path $dll -Leaf
-  Copy-Item -LiteralPath $dll -Destination (Join-Path $InstallDir $dllName) -Force
-  if ($dllName -ne "libWCDB.dll") {
-    Copy-Item -LiteralPath $dll -Destination (Join-Path $InstallDir "libWCDB.dll") -Force
+    Copy-Item -LiteralPath $components.Dll -Destination (Join-Path $stage 'libWCDB.dll') -Force
+    Copy-InstallDocs $stage
+    Set-Content -LiteralPath (Join-Path $stage $InstallMarker) -Value "name=$AppName" -Encoding ASCII
+    $names = @(Get-ChildItem -LiteralPath $stage -File -Recurse -Force | ForEach-Object { $_.FullName.Substring($stage.Length + 1) })
+    if ($names -notcontains 'release-manifest.json') { $names += 'release-manifest.json' }
+    # Complete staging and backups before the first installed file is changed.
+    foreach ($name in $names) {
+      $destination = Join-Path $InstallDir $name
+      if (Test-Path -LiteralPath $destination -PathType Container) { throw "component destination is a directory: $name" }
+      $original[$name] = Test-Path -LiteralPath $destination
+      if ($original[$name]) {
+        $saved = Join-Path $backup $name
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $saved) | Out-Null
+        Copy-Item -LiteralPath $destination -Destination $saved -Force
+      }
+    }
+    foreach ($name in $names) {
+      $destination = Join-Path $InstallDir $name
+      $prepared = Join-Path $stage $name
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+      $attempted.Add($name)
+      if (Test-Path -LiteralPath $prepared) {
+        Move-Item -LiteralPath $prepared -Destination $destination -Force
+      } elseif (Test-Path -LiteralPath $destination) {
+        # Source builds must not retain an older release's provenance.
+        Remove-Item -LiteralPath $destination -Force
+      }
+    }
+  } catch {
+    $installError = $_
+    foreach ($name in $attempted) {
+      $destination = Join-Path $InstallDir $name
+      try {
+        if ($original[$name]) {
+          $saved = Join-Path $backup $name
+          # A locked executable may reject the move without changing its bytes.
+          if ((Test-Path -LiteralPath $destination -PathType Leaf) -and
+              (Get-FileHash -LiteralPath $saved).Hash -eq (Get-FileHash -LiteralPath $destination).Hash) { continue }
+          Move-Item -LiteralPath $saved -Destination $destination -Force
+        } elseif (Test-Path -LiteralPath $destination) {
+          Remove-Item -LiteralPath $destination -Force
+        }
+      } catch {
+        $keepRecovery = $true
+        Add-Warning "could not restore $name; rollback files retained in $transaction"
+      }
+    }
+    throw $installError
+  } finally {
+    if (-not $keepRecovery) { Remove-Item -LiteralPath $transaction -Recurse -Force -ErrorAction SilentlyContinue }
   }
-  Copy-InstallDocs
 }
 
 function Path-ContainsBinDir {
@@ -514,14 +563,23 @@ function Clear-State {
   $script:status = "state_cleared"
 }
 
+function Test-ProcessInInstallRoots([string]$ExecutablePath, [string[]]$Roots) {
+  if ([string]::IsNullOrWhiteSpace($ExecutablePath)) { return $false }
+  foreach ($root in $Roots) {
+    if ([string]::IsNullOrWhiteSpace($root)) { continue }
+    $prefix = [IO.Path]::GetFullPath($root).TrimEnd('\') + '\'
+    if ($ExecutablePath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+  }
+  return $false
+}
+
 function Stop-InstalledProcesses {
   $roots = @($InstallDir, $LegacyInstallDir) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
   if ($roots.Count -eq 0) { return }
   $ownPid = $PID
   $procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
     $_.ProcessId -ne $ownPid -and
-    -not [string]::IsNullOrWhiteSpace($_.ExecutablePath) -and
-    ($roots | Where-Object { $_.ExecutablePath.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }).Count -gt 0
+    (Test-ProcessInInstallRoots $_.ExecutablePath $roots)
   }
   foreach ($proc in $procs) {
     try {
@@ -650,7 +708,7 @@ try {
     $nextAction = "Fix the reported error and rerun install.ps1 -All -Yes -Json."
   }
   Add-ErrorText $_.Exception.Message
-  if ($installDirValidated) {
+  if ($installDirValidated -and -not $DryRun) {
     try { Write-Log $_.Exception.Message } catch { }
   }
   Finish 1

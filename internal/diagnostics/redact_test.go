@@ -19,3 +19,22 @@ func TestRedactDiagnosticsPreservesRecoveryWithoutSecrets(t *testing.T) {
 		t.Fatal("recovery hint removed")
 	}
 }
+
+func TestRedactProviderCredentialsAndImageXORKey(t *testing.T) {
+	for _, input := range []string{
+		`Authorization: Bearer synthetic-secret`,
+		`{"Authorization":"Bearer synthetic-secret"}`,
+		`Proxy-Authorization: Basic synthetic-secret`,
+		`api_key=synthetic-secret`,
+		`api-key="synthetic-secret"`,
+		`apiKey: 'synthetic-secret'`,
+		`access_token=synthetic-secret`,
+		`refresh_token=synthetic-secret`,
+		`image_xor_key=synthetic-secret`,
+	} {
+		got := Redact(input + "; retry request")
+		if strings.Contains(got, "synthetic-secret") || !strings.Contains(got, "retry request") {
+			t.Fatalf("diagnostic redaction = %q", got)
+		}
+	}
+}

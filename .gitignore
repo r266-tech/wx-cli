@@ -5,6 +5,7 @@
 /dist/
 /lib/*.dylib
 /lib/*.dll
+/lib/*.build-inputs.json
 /*.dll
 *.log
 .DS_Store

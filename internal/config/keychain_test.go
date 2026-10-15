@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestKeychainRoundTripNeverRewritesPlaintext(t *testing.T) {
@@ -44,6 +46,100 @@ func TestKeychainRoundTripNeverRewritesPlaintext(t *testing.T) {
 	runtimeKeyLoad = func(string, string) (*keystore.Record, error) { return nil, errors.New("secret error material") }
 	if _, err := Load(); err == nil || err.Error() != "keychain runtime keys unavailable" {
 		t.Fatal("failed read must be redacted and fail closed")
+	}
+}
+
+func TestKeychainMigrationRejectsMismatchedReadback(t *testing.T) {
+	oldLoad, oldSave := runtimeKeyLoad, runtimeKeySave
+	t.Cleanup(func() { runtimeKeyLoad, runtimeKeySave = oldLoad, oldSave })
+	runtimeKeySave = func(keystore.Record) error { return nil }
+	runtimeKeyLoad = func(root, id string) (*keystore.Record, error) {
+		return &keystore.Record{SchemaVersion: 1, WxID: id, DBRoot: root, Keys: map[string]string{"salt": "stale-value"}}, nil
+	}
+	cfg := &Config{SchemaVersion: 2, Wxid: "fixture", DBRoot: "/fixture", Keys: map[string]string{"salt": "new-value"}}
+	if migrated, err := MigrateToKeychain(cfg); err == nil || migrated != nil {
+		t.Fatal("migration discarded plaintext after mismatched Keychain readback")
+	}
+	if cfg.Keys["salt"] != "new-value" {
+		t.Fatal("failed migration changed original config")
+	}
+}
+
+func TestKeychainHydrationPreservesImageKeyEnvironmentOverride(t *testing.T) {
+	t.Setenv("WECHAT_CLI_IMAGE_KEY", "explicit-fixture-image-key")
+	cfg := &Config{Wxid: "fixture", DBRoot: "/fixture", KeyStore: "keychain", KeyStoreRef: keystore.Account("/fixture", "fixture")}
+	err := hydrateRuntimeKeysWith(cfg, func(string, string) (*keystore.Record, error) {
+		return &keystore.Record{SchemaVersion: 1, WxID: "fixture", DBRoot: "/fixture", Keys: map[string]string{"salt": "key"}, ImageKey: "stored-fixture-key"}, nil
+	})
+	if err != nil || cfg.ImageKey != "explicit-fixture-image-key" {
+		t.Fatalf("image key override was discarded: %v", err)
+	}
+}
+
+func TestPersistentKeychainMigrationSerializesConcurrentRefresh(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("WECHAT_CLI_CONFIG", path)
+	if err := Save(&Config{SchemaVersion: 2, Wxid: "fixture", DBRoot: "/fixture", Keys: map[string]string{"old": "value"}}); err != nil {
+		t.Fatal(err)
+	}
+	oldLoad, oldSave := runtimeKeyLoad, runtimeKeySave
+	t.Cleanup(func() { runtimeKeyLoad, runtimeKeySave = oldLoad, oldSave })
+	var mu sync.Mutex
+	var stored []byte
+	runtimeKeySave = func(record keystore.Record) error {
+		mu.Lock()
+		defer mu.Unlock()
+		var err error
+		stored, err = json.Marshal(record)
+		return err
+	}
+	runtimeKeyLoad = func(string, string) (*keystore.Record, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		var record keystore.Record
+		err := json.Unmarshal(stored, &record)
+		return &record, err
+	}
+	backingUp := make(chan struct{})
+	release := make(chan struct{})
+	migrated := make(chan error, 1)
+	go func() {
+		_, err := MigratePersistentToKeychain(func(cfg *Config) error {
+			close(backingUp)
+			<-release
+			return nil
+		})
+		migrated <- err
+	}()
+	<-backingUp
+	mutating := make(chan struct{})
+	updated := make(chan error, 1)
+	go func() {
+		updated <- Update(func(cfg *Config) error {
+			close(mutating)
+			cfg.Keys["new"] = "fresh-value"
+			return nil
+		})
+	}()
+	select {
+	case <-mutating:
+		t.Error("refresh entered while migration held the transaction")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(release)
+	if err := <-migrated; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updated; err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load()
+	if err != nil || cfg.KeyStore != "keychain" || cfg.Keys["new"] != "fresh-value" || cfg.Keys["old"] != "value" {
+		t.Fatalf("concurrent refresh was lost: %v", err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil || strings.Contains(string(b), "fresh-value") || strings.Contains(string(b), `"keys"`) {
+		t.Fatal("plaintext keys persisted after migration")
 	}
 }
 func TestReferenceAloneIsNotReady(t *testing.T) {

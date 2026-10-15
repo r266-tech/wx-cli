@@ -7,6 +7,26 @@ import (
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
+func TestCLIFlagsPreserveTextAndBooleanPositionals(t *testing.T) {
+	for _, value := range []string{"00123", "true", "false"} {
+		args := parseKVFlags([]string{"--chat", value, "--keyword=" + value, "--limit", "2", "--from-me", "true"})
+		if args["chat"] != value || args["keyword"] != value || args["limit"] != int64(2) || args["from_me"] != true {
+			t.Fatalf("typed flags for %q = %#v", value, args)
+		}
+		if err := validateToolArgs("search", args); err != nil {
+			t.Fatalf("valid textual filter rejected: %v", err)
+		}
+	}
+	for _, flag := range []string{"--from-me", "--include-debug", "--since-last"} {
+		for _, value := range []string{"true", "false"} {
+			args := []string{flag, value, "room@chatroom"}
+			if got := firstPositional(args); got != "room@chatroom" {
+				t.Fatalf("firstPositional(%q) = %q", args, got)
+			}
+		}
+	}
+}
+
 func TestReadMessageEventArgsCatchUpUsesOldestUnseenPage(t *testing.T) {
 	args, catchUp, err := readMessageEventArgs(map[string]any{
 		"chat":   "room@chatroom",
@@ -211,4 +231,25 @@ func sessionEventTimestamps(events []map[string]any) []int64 {
 func sessionEventUsername(event map[string]any) string {
 	session, _ := event["session"].(map[string]any)
 	return stringMapValue(session, "username")
+}
+
+func TestCLIOptionTerminatorPreservesLiteralFlags(t *testing.T) {
+	for _, literal := range []string{"--help", "--pretty", "--strict-read-only=false", "--keyword=literal"} {
+		t.Run(literal, func(t *testing.T) {
+			opts, args, err := parseGlobalCLIOptions([]string{"search", "--limit", "2", "--", literal})
+			if err != nil || opts.Pretty || len(args) != 5 {
+				t.Fatalf("global option consumed literal: %#v %#v %v", opts, args, err)
+			}
+			if hasHelpFlag(args[1:]) {
+				t.Fatal("literal became help")
+			}
+			flags := parseKVFlags(args[1:])
+			if len(flags) != 1 || flags["limit"] != int64(2) {
+				t.Fatalf("literal became option: %#v", flags)
+			}
+			if got := firstPositional(args[1:]); got != literal {
+				t.Fatalf("literal positional = %q", got)
+			}
+		})
+	}
 }

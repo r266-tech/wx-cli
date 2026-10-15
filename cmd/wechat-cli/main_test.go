@@ -111,19 +111,19 @@ func TestTalkerHash(t *testing.T) {
 	}
 }
 
-func TestSenderPrefixRe(t *testing.T) {
+func TestVerifiedSenderPrefix(t *testing.T) {
 	cases := []struct {
-		in, want string
+		in, sender, want string
 	}{
-		{"wxid_puf:\nhello", "hello"},
-		{"abc-123:\r\nworld", "world"},
-		{"  wxid_x:\nbody", "body"}, // leading whitespace
-		{"plain text no prefix", "plain text no prefix"},
-		{"https://example.com\nstuff", "https://example.com\nstuff"}, // URL not stripped (':' followed by '/')
-		{"wxid_x: still text", "wxid_x: still text"},                 // ':' not followed by newline
+		{"wxid_puf:\nhello", "wxid_puf", "hello"},
+		{"abc-123:\r\nworld", "abc-123", "world"},
+		{"  wxid_x:\nbody", "wxid_x", "body"}, // leading whitespace
+		{"plain text no prefix", "wxid_x", "plain text no prefix"},
+		{"https://example.com\nstuff", "wxid_x", "https://example.com\nstuff"},
+		{"wxid_x: still text", "wxid_x", "wxid_x: still text"},
 	}
 	for _, c := range cases {
-		got := senderPrefixRe.ReplaceAllString(c.in, "")
+		got := stripVerifiedSenderPrefix(c.in, c.sender)
 		if got != c.want {
 			t.Errorf("strip(%q) = %q, want %q", c.in, got, c.want)
 		}
@@ -311,13 +311,13 @@ func TestReadEventsCursorAndJSONLHelpers(t *testing.T) {
 		t.Fatalf("writeReadEventsJSONL error: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) != 2 || !strings.Contains(lines[0], `"local_id:43"`) || !strings.Contains(lines[1], `"local_id:44"`) {
+	if len(lines) != 3 || !strings.Contains(lines[0], `"local_id:43"`) || !strings.Contains(lines[1], `"local_id:44"`) || !strings.Contains(lines[2], `"type":"checkpoint"`) {
 		t.Fatalf("jsonl output = %q", buf.String())
 	}
 }
 
 func TestResolveLooseSenderSupportsMeAlias(t *testing.T) {
-	srv := &server{cfg: &config.Config{Wxid: "wxid_fixture001_abcd"}}
+	srv := &server{cfg: &config.Config{Wxid: "wxid_fixture001_abcd", DBRoot: filepath.Join(t.TempDir(), "wxid_fixture001_abcd")}}
 	got, err := srv.resolveLooseSenderArg(map[string]any{"sender": "me"})
 	if err != nil {
 		t.Fatalf("sender=me error: %v", err)
@@ -422,7 +422,7 @@ func TestValidateSearchLimitAndMaxTextChars(t *testing.T) {
 	if err := validateToolArgs("read_events", map[string]any{"limit": int64(1001)}); err == nil || !strings.Contains(err.Error(), "maximum is 1000") {
 		t.Fatalf("read_events limit validation error = %v", err)
 	}
-	if err := validateToolArgs("read_events", map[string]any{"scan_limit": int64(5001)}); err == nil || !strings.Contains(err.Error(), "maximum is 5000") {
+	if err := validateToolArgs("read_events", map[string]any{"scan_limit": int64(100001)}); err == nil || !strings.Contains(err.Error(), "maximum is 100000") {
 		t.Fatalf("read_events scan_limit validation error = %v", err)
 	}
 }
@@ -513,7 +513,7 @@ func TestTailSchemaExposesLimitBounds(t *testing.T) {
 		t.Fatalf("tail limit schema = %#v", limit)
 	}
 	scanLimit, _ := props["scan_limit"].(map[string]any)
-	if scanLimit["minimum"] != int64(1) || scanLimit["maximum"] != int64(5000) {
+	if scanLimit["minimum"] != int64(1) || scanLimit["maximum"] != int64(100000) {
 		t.Fatalf("tail scan_limit schema = %#v", scanLimit)
 	}
 }
@@ -860,7 +860,7 @@ func TestBoolKVFlagsDoNotConsumePositionals(t *testing.T) {
 }
 
 func TestContentSummary_Text(t *testing.T) {
-	got := contentSummary(1, 0, "wxid_x:\nhello world", nil)
+	got := contentSummary(1, 0, "wxid_x:\nhello world", nil, "wxid_x")
 	if got != "hello world" {
 		t.Errorf("text = %q, want 'hello world'", got)
 	}
@@ -2251,7 +2251,7 @@ func TestChatTimelineEnvelopeIncludesQueryAndFreshness(t *testing.T) {
 		rows,
 		msgs,
 		messagePageInfo{Limit: 2, Offset: 0, Returned: 2, HasMore: true, NextOffset: 2},
-		"sort_seq DESC, local_id DESC",
+		"sort_seq DESC, local_id DESC, server_id DESC",
 		"asc",
 	)
 	if _, ok := env["messages"].([]map[string]any); !ok {
@@ -2313,7 +2313,7 @@ func TestSortLiveMessageRowsAcrossShards(t *testing.T) {
 		{"local_id": int64(3), "sort_seq": int64(300), "create_time": int64(10)},
 		{"local_id": int64(2), "sort_seq": int64(200), "create_time": int64(20)},
 	}
-	sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC")
+	sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC, server_id DESC")
 	if got := []int64{rowInt64(rows[0], "local_id"), rowInt64(rows[1], "local_id"), rowInt64(rows[2], "local_id")}; got[0] != 3 || got[1] != 2 || got[2] != 1 {
 		t.Fatalf("sort_seq desc order = %v, want [3 2 1]", got)
 	}
@@ -2325,11 +2325,11 @@ func TestSortLiveMessageRowsAcrossShards(t *testing.T) {
 
 func TestMessageOrderAndDisplayOrder(t *testing.T) {
 	sql, err := messageQueryOrderSQL(map[string]any{"order": "asc"})
-	if err != nil || sql != "sort_seq ASC, local_id ASC" {
+	if err != nil || sql != "sort_seq ASC, local_id ASC, server_id ASC" {
 		t.Fatalf("messageQueryOrderSQL asc = (%q,%v)", sql, err)
 	}
 	sql, err = messageQueryOrderSQL(map[string]any{})
-	if err != nil || sql != "sort_seq DESC, local_id DESC" {
+	if err != nil || sql != "sort_seq DESC, local_id DESC, server_id DESC" {
 		t.Fatalf("messageQueryOrderSQL default = (%q,%v)", sql, err)
 	}
 	if display, err := messagesDisplayOrder(map[string]any{"display_order": "asc"}); err != nil || display != "asc" {

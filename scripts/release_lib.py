@@ -5,6 +5,7 @@ import os
 import re
 import stat
 import subprocess
+import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -23,7 +24,7 @@ def git(root, *args):
 
 def safe_name(name):
     p = PurePosixPath(name)
-    if not name or '\\' in name or p.is_absolute() or '..' in p.parts or ':' in name or str(p) != name.rstrip('/'):
+    if not name or not p.parts or '\\' in name or p.is_absolute() or '..' in p.parts or ':' in name or str(p) != name.rstrip('/'):
         raise ValueError('unsafe archive path')
     return p
 
@@ -38,10 +39,11 @@ def extract_zip(archive, destination, max_bytes=1024**3):
             raise ValueError('archive budget exceeded')
         seen = set()
         for i in entries:
-            safe_name(i.filename)
-            if i.filename in seen or stat.S_ISLNK(i.external_attr >> 16):
+            name = safe_name(i.filename)
+            key = str(name).casefold()
+            if key in seen or stat.S_ISLNK(i.external_attr >> 16):
                 raise ValueError('duplicate or symlink archive entry')
-            seen.add(i.filename)
+            seen.add(key)
         destination.mkdir(parents=True, mode=0o700)
         z.extractall(destination)
         for i in entries:
@@ -80,7 +82,7 @@ def verify_manifest(root, expected_version=None, expected_commit=None):
     for p in root.rglob('*'):
         if p.is_symlink():
             raise ValueError('packaged symlink')
-        if p.is_file() and p.name != 'release-manifest.json':
+        if p.is_file() and p != root / 'release-manifest.json':
             actual.add(p.relative_to(root).as_posix())
     if actual != set(d['artifacts']):
         raise ValueError('manifest file set mismatch')
@@ -95,3 +97,30 @@ def verify_manifest(root, expected_version=None, expected_commit=None):
         if d['dependencies'][dep]['binary_sha256'] != d['artifacts'][filename]['sha256']:
             raise ValueError('component hash mismatch')
     return d
+
+
+def verify_acceptance_artifact(archive, *, binary=None, package=None, receipt=None):
+    """Bind acceptance to the exact ZIP, executable and installed package bytes."""
+    archive_hash = sha256(archive)
+    if receipt is not None and receipt.get('artifact_sha256') != archive_hash:
+        raise ValueError('acceptance receipt archive hash mismatch')
+    with tempfile.TemporaryDirectory(prefix='wx-acceptance-identity-') as temp:
+        extracted = Path(temp)/'extract'
+        extract_zip(archive, extracted)
+        roots = list(extracted.iterdir())
+        if len(roots) != 1 or not roots[0].is_dir():
+            raise ValueError('expected one package root')
+        root = roots[0]
+        manifest = verify_manifest(root)
+        if 'wechat-cli' not in manifest['artifacts']:
+            raise ValueError('acceptance executable missing from archive')
+        if receipt is not None and (receipt.get('version'), receipt.get('commit')) != (manifest['version'], manifest['commit']):
+            raise ValueError('acceptance receipt package identity mismatch')
+        if binary is not None and sha256(binary) != manifest['artifacts']['wechat-cli']['sha256']:
+            raise ValueError('acceptance binary differs from release archive')
+        if package is not None:
+            package = Path(package)
+            verify_manifest(package, manifest['version'], manifest['commit'])
+            if sha256(package/'release-manifest.json') != sha256(root/'release-manifest.json'):
+                raise ValueError('rehearsal package differs from release archive')
+    return manifest

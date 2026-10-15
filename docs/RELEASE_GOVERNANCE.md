@@ -14,7 +14,7 @@ and user state locations remain compatible. No automatic user-state migration is
 performed by repository migration. Additive JSON fields are version/commit metadata.
 
 The initial public source tag `v2.0.0` identifies the initial import, not an accepted
-binary release. It is not moved. The current corrected candidate uses `v2.0.1-rc.4`;
+binary release. It is not moved. The current corrected candidate uses `v2.0.1-rc.6`;
 formal `v2.0.1` requires all gates. Do not reuse a published source tag or asset name.
 
 ## Build inputs
@@ -66,9 +66,12 @@ asset set blocks promotion. Ad-hoc candidates do not satisfy the stable gate.
 ## Local acceptance and rollback
 
 Run `scripts/acceptance-macos.py --binary PATH --archive ZIP` against the exact
-candidate. It reads live data in memory and writes only a private allowlisted
-receipt. Empty messages/search/media are failures. Full archive coverage is
-required. Existing legacy packages are only rollback candidates if their own
+candidate. It verifies the executable bytes against the ZIP before live reads.
+Digest and archive checks create private local exports; their message contents
+are excluded from the allowlisted receipt. Empty messages/search/media are failures.
+Full archive coverage is required. Installer rehearsal accepts `--archive ZIP`
+(default: `PACKAGE.zip` beside `--package`) and verifies that the package,
+archive hash and receipt identity match before running. Existing legacy packages are only rollback candidates if their own
 installer can start and read the preserved Keychain/config correctly.
 
 Install/update/rollback/uninstall rehearsals must use a dedicated HOME and managed
@@ -77,6 +80,16 @@ state to simulate a fresh machine. A same-host isolated installation is not proo
 of a truly new Mac: a separate Mac/VM acceptance remains a separate receipt check.
 Do not mark skipped or blocked checks passed. Preserve the current default release
 and user's working installation until the corrected signed release is accepted.
+Component updates stage all new files before replacement and restore previous
+components if replacement fails. If the filesystem also prevents restoration,
+the installer retains its backup directory and reports its recovery path.
+
+Windows packaging records its own pinned WCDB build evidence and creates the
+manifest before archiving. Windows artifacts remain unsigned candidates; their
+bootstrap requires an explicit prerelease tag and `-AllowPrerelease` (CLI:
+`update --tag vX.Y.Z-rc.N --allow-prerelease`). This does not establish Windows
+stable signing or acceptance. Windows archive and uninstall-path regressions run
+on the Windows CI runner; a macOS run does not replace native Windows acceptance.
 
 ### Keychain authorization after an update
 

@@ -26,7 +26,7 @@ Usage:
   curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/download/install-release.sh | zsh
   ./scripts/install-release.sh [--dry-run] [--json] [--update] [--with-asr] [installer args...]
   ./scripts/install-release.sh --all [--json]   # install + first key bootstrap
-  ./scripts/install-release.sh --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease
+  ./scripts/install-release.sh --repo r266-tech/wx-cli --tag v2.0.1-rc.6 --allow-prerelease
 
 Environment:
   WECHAT_CLI_REPO             GitHub repo URL or owner/name. Default: r266-tech/wechat-cli-releases.
@@ -234,15 +234,17 @@ main() {
 
   local slug base url tmp zip sha extract install_script install_dir fallback
   slug="$(repo_slug "$REPO")"
+  [[ "$slug" =~ '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$' ]] || fail "invalid GitHub repository"
   base="$(repo_url "$REPO")"
   have_cmd python3 || fail "python3 is required for manifest validation."
   if [[ "$TAG" == "latest" ]]; then
     TAG="$(fetch_text "https://api.github.com/repos/$slug/releases/latest" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')" || fail "release_endpoint_unavailable"
   fi
-  [[ "$TAG" == v[0-9]* ]] || fail "invalid release tag"
+  [[ "$TAG" =~ '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' ]] || fail "invalid release tag"
   if [[ "$ASSET" == "wechat-cli-latest-darwin-arm64.zip" ]]; then
     ASSET="wechat-cli-${TAG}-darwin-arm64.zip"
   fi
+  [[ "$ASSET" =~ '^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$' ]] || fail "invalid release asset filename"
   url="$(asset_url "$base" "$slug" "$TAG" "$ASSET")"
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/wechat-cli-install.XXXXXX")"
   if [[ "$KEEP_DOWNLOAD" != "1" ]]; then
@@ -280,7 +282,7 @@ main() {
   fi
 
   # Embedded dependency-free verifier runs before any installer from the zip.
-  python3 - "$zip" "$extract" "${TAG#v}" "$ALLOW_PRERELEASE" <<'VERIFY_RELEASE_PY'
+  install_dir="$(python3 - "$zip" "$extract" "${TAG#v}" "$ALLOW_PRERELEASE" <<'VERIFY_RELEASE_PY'
 """Standalone bootstrap verifier. Kept dependency-free for embedding in installers."""
 import hashlib
 import json
@@ -299,9 +301,14 @@ def verify_and_extract(archive, destination, expected_version, allow_prerelease=
         names=set();roots=set()
         for i in infos:
             p=PurePosixPath(i.filename)
-            if p.is_absolute() or '..' in p.parts or '\\' in i.filename or ':' in i.filename or stat.S_ISLNK(i.external_attr>>16):raise ValueError('unsafe release path')
-            if i.filename in names:raise ValueError('duplicate release path')
-            names.add(i.filename);roots.add(p.parts[0])
+            if (not p.parts or p.is_absolute() or '..' in p.parts or '\\' in i.filename or ':' in i.filename
+                    or str(p) != i.filename.rstrip('/') or stat.S_ISLNK(i.external_attr>>16)):
+                raise ValueError('unsafe release path')
+            # macOS defaults to a case-insensitive filesystem; also reject a
+            # directory/file alias before extraction can replace verified bytes.
+            key=str(p).casefold()
+            if key in names:raise ValueError('duplicate release path')
+            names.add(key);roots.add(p.parts[0])
         if len(roots)!=1:raise ValueError('expected one release root')
         prefix=roots.pop()+'/'
         d=json.loads(z.read(prefix+'release-manifest.json'))
@@ -327,10 +334,8 @@ def verify_and_extract(archive, destination, expected_version, allow_prerelease=
 
 if __name__=='__main__':print(verify_and_extract(*sys.argv[1:]))
 VERIFY_RELEASE_PY
-  [[ "$?" -eq 0 ]] || fail "release manifest verification failed"
-  install_script="$(find "$extract" -maxdepth 3 -type f -name install.sh | head -n 1)"
-  [[ -n "$install_script" ]] || fail "install.sh not found inside release zip"
-  install_dir="${install_script:h}"
+)" || fail "release manifest verification failed"
+  [[ -f "$install_dir/install.sh" ]] || fail "install.sh not found at verified release root"
 
   say "Running bundled installer from $install_dir"
   ( cd "$install_dir" && ./install.sh "${INSTALL_ARGS[@]}" )

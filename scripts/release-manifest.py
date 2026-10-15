@@ -31,7 +31,7 @@ def main():
     artifacts={}
     for p in sorted(root.rglob('*')):
         if p.is_symlink(): raise ValueError('packaged symlink')
-        if p.is_file() and p.name!='release-manifest.json':
+        if p.is_file() and p!=root/'release-manifest.json':
             artifacts[p.relative_to(root).as_posix()]={'bytes':p.stat().st_size,'sha256':sha256(p)}
     for dep,filename in [('wxkey','wxkey'),('wcdb','libWCDB.dylib')]:
         lock[dep]['binary_sha256']=artifacts[filename]['sha256']

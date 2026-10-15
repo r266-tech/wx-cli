@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/r266-tech/wx-cli/v2/internal/config"
@@ -38,7 +39,7 @@ func TestReadOSFullChatWorkflowUsesStableCursor(t *testing.T) {
 			continue
 		}
 		commands, _ := workflow["commands"].([]string)
-		if len(commands) != 2 || commands[1] != `repeat with --before-message <data.query.cursor.next_before_message> while data.query.has_more` {
+		if len(commands) != 2 || commands[1] != `repeat with --before-message-token <data.query.cursor.next_before_message_token> while data.query.has_more` {
 			t.Fatalf("page_full_chat commands = %#v", commands)
 		}
 		return
@@ -81,4 +82,57 @@ func TestDigestHelpersSortCountsAndUsePrivateAtomicState(t *testing.T) {
 	if err != nil || (runtime.GOOS != "windows" && info.Mode().Perm() != 0o600) {
 		t.Fatalf("digest state permissions = %v %v", info, err)
 	}
+}
+
+func TestAssistantSchemasExposeStableObservationInputs(t *testing.T) {
+	for _, fixture := range []struct {
+		command    string
+		properties []string
+	}{
+		{"timeline", []string{"before_message_token", "after_message_token"}},
+		{"history", []string{"before_message_token", "after_message_token"}},
+		{"context", []string{"message_token"}},
+		{"tail", []string{"cursor", "cursor_storage", "scan_limit", "type_filter", "keyword", "unread_only"}},
+	} {
+		t.Run(fixture.command, func(t *testing.T) {
+			_, tool, ok := cliHelpForTarget(fixture.command)
+			if !ok {
+				t.Fatal("tool not found")
+			}
+			tool = displayToolDef(tool)
+			properties := toolInputProperties(tool)
+			for _, name := range fixture.properties {
+				property, exists := properties[name]
+				if !exists || property == nil {
+					t.Fatalf("assistant schema hides %s", name)
+				}
+			}
+			if fixture.command == "tail" {
+				if tool.LocalWriteMode != "possible" || tool.StrictReadOnlyBehavior != "allowed_without_writes" {
+					t.Fatalf("session cursor storage contract = %#v", tool)
+				}
+				if got := properties["scan_limit"].(map[string]any)["maximum"]; got != int64(100000) {
+					t.Fatalf("session scan maximum = %v", got)
+				}
+				values := properties["cursor_storage"].(map[string]any)["enum"].([]string)
+				if strings.Join(values, ",") != "auto,local,inline" {
+					t.Fatalf("cursor storage = %v", values)
+				}
+			}
+		})
+	}
+}
+
+func TestReadOSExplainsSessionObservationBoundary(t *testing.T) {
+	for _, entry := range readOSEntrypoints() {
+		if entry["command"] != "tail" {
+			continue
+		}
+		use, _ := entry["use"].(string)
+		if !strings.Contains(use, "unread-only changes") || !strings.Contains(use, "not a complete event log") {
+			t.Fatalf("session observation contract = %q", use)
+		}
+		return
+	}
+	t.Fatal("tail entrypoint not found")
 }

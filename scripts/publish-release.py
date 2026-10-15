@@ -16,19 +16,50 @@ def gh(*args):
 
 
 def check_receipt(d, manifest, archive_hash):
-    if d.get('schema_version')!=1 or not d.get('passed'):
+    if type(d.get('schema_version')) is not int or d['schema_version']!=1 or d.get('passed') is not True:
         raise ValueError('acceptance receipt did not pass')
     if (d.get('version'),d.get('commit'),d.get('artifact_sha256'))!=(manifest['version'],manifest['commit'],archive_hash):
         raise ValueError('receipt does not identify these exact artifact bytes')
+    if (d.get('platform'),d.get('arch'))!=('darwin','arm64'):
+        raise ValueError('receipt platform does not match the release')
     required={'install','doctor','keychain','sessions','timeline','context','search','media','digest','archive','update','rollback','uninstall','clean_machine','release_endpoint_install'}
     checks=d.get('checks',{})
-    if not required<=checks.keys() or any(checks[k].get('status')!='passed' for k in required):
+    if not isinstance(checks,dict) or set(checks)!=required or any(not isinstance(c,dict) or c.get('status')!='passed' for c in checks.values()):
         raise ValueError('acceptance is incomplete')
     # This receipt is uploaded; reject non-allowlisted fields instead of redacting after upload.
     if set(d)-{'schema_version','passed','version','commit','artifact_sha256','platform','arch','checks'}:
         raise ValueError('receipt has non-public fields')
     for c in checks.values():
         if set(c)-{'status','count','duration_ms','warning_codes'}:raise ValueError('unsafe receipt fields')
+        for key in ('count','duration_ms'):
+            if key in c and (type(c[key]) is not int or c[key]<0):raise ValueError('invalid numeric receipt field')
+        codes=c.get('warning_codes',[])
+        if not isinstance(codes,list) or len(codes)>32 or any(not isinstance(code,str) or not re.fullmatch('[a-z][a-z0-9_]{0,63}',code) for code in codes):
+            raise ValueError('invalid receipt warning codes')
+
+
+def check_promotion_assets(directory, package, archive):
+    """Recheck every public download, not just the versioned ZIP, at promotion."""
+    directory, package, archive = Path(directory), Path(package), Path(archive)
+    latest = 'wechat-cli-latest-darwin-arm64.zip'
+    names = {archive.name, latest, 'release-manifest.json', 'acceptance-receipt.json'}
+    checked = (archive.name, latest, 'install-release.sh', 'install-release.ps1')
+    names.update(checked)
+    names.update(name+'.sha256' for name in checked)
+    if {p.name for p in directory.iterdir() if p.is_file()} != names:
+        raise ValueError('promotion requires the complete exact release asset set')
+    for name in checked:
+        checksum = (directory/(name+'.sha256')).read_text().split()
+        if not checksum or not re.fullmatch('[0-9a-fA-F]{64}', checksum[0]):
+            raise ValueError('invalid asset checksum: '+name)
+        if sha256(directory/name) != checksum[0].lower():
+            raise ValueError('asset checksum mismatch: '+name)
+    if sha256(directory/latest) != sha256(archive):
+        raise ValueError('latest archive differs from the accepted archive')
+    for name in ('install-release.sh', 'install-release.ps1', 'release-manifest.json'):
+        packaged = package/name if name == 'release-manifest.json' else package/'scripts'/name
+        if sha256(directory/name) != sha256(packaged):
+            raise ValueError('standalone asset differs from accepted package: '+name)
 
 
 def main():
@@ -52,6 +83,7 @@ def main():
     pkg=temp/'extract'/name[:-4]
     manifest=verify_manifest(pkg,a.version,a.commit)
     if a.promote:
+        check_promotion_assets(temp,pkg,archive)
         if manifest['signing_mode']!='developer_id' or manifest['notarization_status']!='accepted' or manifest['channel']!='stable':
             raise ValueError('stable requires verified Developer ID and notarization')
         check_receipt(json.loads((temp/'acceptance-receipt.json').read_text()),manifest,expected)
