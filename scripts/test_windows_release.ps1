@@ -136,6 +136,9 @@ try {
   $dryResult = & $engine -NoProfile -NonInteractive -File $dryScript -DryRun -Yes -Json -InstallDir $dryInstall -BinDir (Join-Path $testRoot 'dry-run-bin')
   if ($LASTEXITCODE -eq 0 -or ($dryResult | ConvertFrom-Json).status -ne 'blocked') { throw 'dry-run failure fixture did not fail as expected' }
   if (Test-Path -LiteralPath $dryInstall) { throw 'failed dry run created install directory or logs' }
+  # The dry-run fixture intentionally exits non-zero; do not leak that expected
+  # native exit code into the enclosing PowerShell process.
+  $global:LASTEXITCODE = 0
   Write-Output 'Windows fixtures passed: 11 archive cases, component success/rollback, source build priority, and failed dry-run isolation.'
 } finally {
   Remove-Item -LiteralPath $testRoot -Recurse -Force
