@@ -2,6 +2,7 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'install-release.ps1')
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.IO.Compression
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('wx-release-test-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 
@@ -23,7 +24,7 @@ function New-TestArchive([string]$Path, [string]$Mutation) {
   if ($Mutation -eq 'hash') { $artifacts['install.ps1'].sha256 = ('0' * 64) }
   if ($Mutation -eq 'identity') { $manifest.platform_arch = 'darwin-arm64' }
   if ($Mutation -eq 'missing-file') { $files.Remove('wechat-cli.exe') }
-  $archive = [IO.Compression.ZipFile]::Open($Path, [IO.Compression.ZipArchiveMode]::Create)
+  $archive = [System.IO.Compression.ZipFile]::Open($Path, [System.IO.Compression.ZipArchiveMode]::Create)
   try {
     foreach ($name in $files.Keys) {
       $entry = $archive.CreateEntry('pkg/' + $name)
