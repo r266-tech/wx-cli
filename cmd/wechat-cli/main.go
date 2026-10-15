@@ -864,24 +864,36 @@ func messageCursorMeta(rows []wcdb.Row) map[string]any {
 		}
 	}
 	return compactMap(map[string]any{
-		"oldest_local_id":     rowInt64(oldest, "local_id"),
-		"newest_local_id":     rowInt64(newest, "local_id"),
-		"next_before_message": rowInt64(oldest, "local_id"),
-		"next_after_message":  rowInt64(newest, "local_id"),
+		"oldest_local_id":           rowInt64(oldest, "local_id"),
+		"newest_local_id":           rowInt64(newest, "local_id"),
+		"next_before_message":       rowInt64(oldest, "local_id"),
+		"next_after_message":        rowInt64(newest, "local_id"),
+		"next_before_server_id_str": agentMessageID(oldest)["server_id_str"],
+		"next_after_server_id_str":  agentMessageID(newest)["server_id_str"],
+		"next_before_message_token": rowString(oldest, "message_token"),
+		"next_after_message_token":  rowString(newest, "message_token"),
 	})
 }
 
 func messageRowLess(a, b wcdb.Row) bool {
 	at := rowInt64(a, "sort_seq")
 	bt := rowInt64(b, "sort_seq")
-	if at == 0 && bt == 0 {
+	_, aHasSequence := a["sort_seq"]
+	_, bHasSequence := b["sort_seq"]
+	if !aHasSequence && !bHasSequence {
 		at = rowInt64(a, "create_time")
 		bt = rowInt64(b, "create_time")
 	}
 	if at != bt {
 		return at < bt
 	}
-	return rowInt64(a, "local_id") < rowInt64(b, "local_id")
+	if rowInt64(a, "local_id") != rowInt64(b, "local_id") {
+		return rowInt64(a, "local_id") < rowInt64(b, "local_id")
+	}
+	if rowInt64(a, "server_id") != rowInt64(b, "server_id") {
+		return rowInt64(a, "server_id") < rowInt64(b, "server_id")
+	}
+	return rowString(a, "_message_shard") < rowString(b, "_message_shard")
 }
 
 func formatUnixLocal(ts int64) string {
@@ -894,9 +906,9 @@ func formatUnixLocal(ts int64) string {
 func messageQueryOrderSQL(a map[string]any) (string, error) {
 	switch normalizeOrderArg(getStr(a, "order")) {
 	case "", "desc":
-		return "sort_seq DESC, local_id DESC", nil
+		return "sort_seq DESC, local_id DESC, server_id DESC", nil
 	case "asc":
-		return "sort_seq ASC, local_id ASC", nil
+		return "sort_seq ASC, local_id ASC, server_id ASC", nil
 	default:
 		return "", fmt.Errorf("invalid order=%q: must be \"desc\" or \"asc\"", getStr(a, "order"))
 	}
@@ -934,24 +946,10 @@ func applyMessageDisplayOrder(rows []wcdb.Row, order string) {
 	}
 	asc := order == "asc"
 	sort.SliceStable(rows, func(i, j int) bool {
-		ti := rowInt64(rows[i], "sort_seq")
-		tj := rowInt64(rows[j], "sort_seq")
-		if ti == 0 && tj == 0 {
-			ti = rowInt64(rows[i], "create_time")
-			tj = rowInt64(rows[j], "create_time")
-		}
-		if ti != tj {
-			if asc {
-				return ti < tj
-			}
-			return ti > tj
-		}
-		li := rowInt64(rows[i], "local_id")
-		lj := rowInt64(rows[j], "local_id")
 		if asc {
-			return li < lj
+			return messageRowLess(rows[i], rows[j])
 		}
-		return li > lj
+		return messageRowLess(rows[j], rows[i])
 	})
 }
 
@@ -963,19 +961,25 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	if talker == "" {
 		return nil, messagePageInfo{}, fmt.Errorf("talker or chat is required")
 	}
+	if err := s.validateMessageBoundaryTokenScopes(a, talker); err != nil {
+		return nil, messagePageInfo{}, err
+	}
 	if aggregatorSessions[talker] {
 		return nil, messagePageInfo{}, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
 	}
 	tableName := "Msg_" + talkerHash(talker)
 	shards, err := s.findMsgDBs(tableName)
 	if err != nil {
+		if getStr(a, "before_message_token") != "" || getStr(a, "after_message_token") != "" {
+			return nil, messagePageInfo{}, fmt.Errorf("message_cursor_stale: original message source is unavailable: %w", err)
+		}
 		return nil, messagePageInfo{}, err
 	}
 	defer closeMsgDBs(shards)
 	shardWarnings := msgShardWarnings(shards)
 
 	sender := ""
-	if senderArg := getStr(a, "sender"); senderArg != "" {
+	if getStr(a, "sender") != "" || getBoolDefault(a, "from_me", false) {
 		resolved, err := s.resolveLooseSenderArg(a)
 		if err != nil {
 			return nil, messagePageInfo{}, err
@@ -1001,7 +1005,8 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		where = append(where, "create_time < ?")
 		args = append(args, ts)
 	}
-	if err := s.appendMessageBoundaryWhere(a, shards, tableName, &where, &args); err != nil {
+	boundaries, err := s.resolveMessageBoundaries(a, shards, tableName)
+	if err != nil {
 		return nil, messagePageInfo{}, err
 	}
 	if baseKind := getInt(a, "base_kind", 0); baseKind != 0 {
@@ -1017,7 +1022,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		args = append(args, kargs...)
 	}
 	if order == "" {
-		order = "sort_seq DESC, local_id DESC"
+		order = "sort_seq DESC, local_id DESC, server_id DESC"
 	}
 	limit := getInt(a, "limit", 50)
 	offset := getInt(a, "offset", 0)
@@ -1037,7 +1042,21 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	for _, shard := range shards {
 		shardWhere := append([]string(nil), where...)
 		shardArgs := append([]any(nil), args...)
-		n2i, _ := loadName2Id(shard.DB)
+		for _, boundary := range boundaries {
+			condition, boundaryArgs, err := messageBoundaryWhere(boundary.Anchor, boundary.Direction, shard.Name)
+			if err != nil {
+				return nil, messagePageInfo{}, err
+			}
+			shardWhere = append(shardWhere, condition)
+			shardArgs = append(shardArgs, boundaryArgs...)
+		}
+		n2i, nameErr := loadName2Id(shard.DB)
+		if nameErr != nil {
+			if sender != "" {
+				return nil, messagePageInfo{}, fmt.Errorf("%s: cannot apply sender filter: %w", shard.Name, nameErr)
+			}
+			page.Warnings = appendUniqueStrings(page.Warnings, "sender_metadata_unavailable: "+shard.Name)
+		}
 		if sender != "" {
 			var senderID int64
 			found := false
@@ -1071,6 +1090,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 			batch = enrichMessages(decodeFields(batch, "message_content", "source"))
 			for _, r := range batch {
 				r["talker"] = talker
+				s.attachMessageToken(talker, shard.Name, r)
 				r["chat_type"] = agentChatType(talker, wxkind.ClassifyUsername(talker), false)
 				baseKind, subtype, kindName := wxkind.Unpack(rowInt64(r, "local_type"))
 				r["base_kind"] = baseKind
@@ -1152,7 +1172,9 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 	if selfWxid := s.selfWxid(); selfWxid != "" {
 		for _, r := range rows {
 			sw, _ := r["sender_wxid"].(string)
-			r["is_from_me"] = (sw == selfWxid)
+			if sw != "" {
+				r["is_from_me"] = (sw == selfWxid)
+			}
 		}
 	}
 	for _, r := range rows {
@@ -1189,6 +1211,15 @@ func sortLiveMessageRows(rows []wcdb.Row, order string) {
 		}
 		ii := rowInt64(rows[i], "local_id")
 		ij := rowInt64(rows[j], "local_id")
+		if ii == ij {
+			ii, ij = rowInt64(rows[i], "server_id"), rowInt64(rows[j], "server_id")
+		}
+		if ii == ij {
+			if localAsc {
+				return rowString(rows[i], "_message_shard") < rowString(rows[j], "_message_shard")
+			}
+			return rowString(rows[i], "_message_shard") > rowString(rows[j], "_message_shard")
+		}
 		if localAsc {
 			return ii < ij
 		}
@@ -1401,10 +1432,10 @@ func agentSourceMessageKeys(talker string, localID int64, serverIDStr string, se
 		serverIDStr = strconv.FormatInt(serverID, 10)
 	}
 	if serverIDStr != "" {
-		keys = append(keys, "server:"+serverIDStr)
 		if talker != "" {
 			keys = append(keys, "talker:"+talker+"\x00server:"+serverIDStr)
 		}
+		keys = append(keys, "server:"+serverIDStr)
 	}
 	return keys
 }
@@ -1432,6 +1463,7 @@ func agentMessageID(r wcdb.Row) map[string]any {
 		"talker":        rowString(r, "talker"),
 		"local_id":      rowInt64(r, "local_id"),
 		"server_id_str": serverIDStr,
+		"message_token": rowString(r, "message_token"),
 	})
 }
 
@@ -1611,7 +1643,7 @@ func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 		}
 	}
 	refKind := wxkind.Resolve(int32(refType), refSubtype)
-	refText := contentSummary(int32(refType), refSubtype, refRaw, refParsed)
+	refText := contentSummary(int32(refType), refSubtype, refRaw, refParsed, stringMapValue(refer, "fromusr"))
 	refSender := firstNonEmpty(stringMapValue(refer, "displayname"), stringMapValue(refer, "fromusr"))
 	if stringMapValue(refer, "displayname") == "" && stringMapValue(refer, "fromusr") == rowString(r, "sender_wxid") {
 		refSender = agentMessageSender(r)
@@ -1640,7 +1672,7 @@ func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 			refHints = r["media_read_hints"]
 		}
 		refRow := wcdb.Row{
-			"talker":                    firstNonEmpty(stringMapValue(refer, "chatusr"), rowString(r, "talker")),
+			"talker":                    firstNonEmpty(rowString(r, "talker"), stringMapValue(refer, "chatusr")),
 			"server_id_str":             stringMapValue(refer, "svrid"),
 			"base_kind":                 refType,
 			"subtype":                   refSubtype,
@@ -3046,6 +3078,9 @@ func (s *server) enrichMessageMediaResources(rows []wcdb.Row) error {
 	if len(rows) == 0 {
 		return nil
 	}
+	// XML and VoiceInfo hints are independent of the resource index. Preserve
+	// that enrichment even when the optional resource database cannot be read.
+	defer s.attachMediaReadHintsToMessages(rows)
 	byTalker := map[string][]int64{}
 	for _, r := range rows {
 		if !messageMayHaveMedia(rowInt64(r, "base_kind"), rowString(r, "kind_name")) {
@@ -3059,7 +3094,6 @@ func (s *server) enrichMessageMediaResources(rows []wcdb.Row) error {
 		byTalker[talker] = append(byTalker[talker], localID)
 	}
 	if len(byTalker) == 0 {
-		s.attachMediaReadHintsToMessages(rows)
 		return nil
 	}
 
@@ -3112,7 +3146,6 @@ func (s *server) enrichMessageMediaResources(rows []wcdb.Row) error {
 		}
 	}
 	s.attachMediaResourceRowsToMessages(rows, resourceRows)
-	s.attachMediaReadHintsToMessages(rows)
 	return nil
 }
 
@@ -4364,12 +4397,7 @@ func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	tmp := dst + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return "", err
-	}
-	if err := os.Rename(tmp, dst); err != nil {
-		_ = os.Remove(tmp)
+	if err := atomicPrivateWrite(dst, data); err != nil {
 		return "", err
 	}
 	return dst, nil
@@ -4665,21 +4693,32 @@ func (s *server) voiceBlob(talker string, localID, serverID, createTime int64) (
 	var clauses []string
 	var args []any
 	args = append(args, talker)
-	if localID != 0 && createTime != 0 {
-		clauses = append(clauses, "(v.local_id = ? AND ABS(v.create_time - ?) <= 5)")
-		args = append(args, localID, createTime)
-	}
 	if serverID != 0 {
 		clauses = append(clauses, "(v.svr_id = ? AND v.svr_id != 0)")
 		args = append(args, serverID)
 	}
-	if createTime != 0 {
-		clauses = append(clauses, "v.create_time = ?")
-		args = append(args, createTime)
+	var fallback []string
+	var fallbackArgs []any
+	if localID != 0 && createTime != 0 {
+		fallback = append(fallback, "(v.local_id = ? AND ABS(v.create_time - ?) <= 5)")
+		fallbackArgs = append(fallbackArgs, localID, createTime)
+	} else if localID != 0 {
+		fallback = append(fallback, "v.local_id = ?")
+		fallbackArgs = append(fallbackArgs, localID)
 	}
-	if localID != 0 {
-		clauses = append(clauses, "v.local_id = ?")
-		args = append(args, localID)
+	if createTime != 0 {
+		fallback = append(fallback, "v.create_time = ?")
+		fallbackArgs = append(fallbackArgs, createTime)
+	}
+	if len(fallback) > 0 {
+		condition := "(" + strings.Join(fallback, " OR ") + ")"
+		if serverID != 0 {
+			// Local IDs can be reused after a message shard rotates. A fallback
+			// must never override a known, conflicting server identity.
+			condition = "(COALESCE(v.svr_id, 0) = 0 AND " + condition + ")"
+		}
+		clauses = append(clauses, condition)
+		args = append(args, fallbackArgs...)
 	}
 	if len(clauses) == 0 {
 		return nil, nil
@@ -4698,9 +4737,12 @@ func (s *server) voiceBlob(talker string, localID, serverID, createTime int64) (
 		ORDER BY CASE WHEN v.svr_id = ? AND v.svr_id != 0 THEN 0 ELSE 1 END,
 			CASE WHEN ? != 0 THEN ABS(v.create_time - ?) ELSE 0 END,
 			v.create_time DESC
-		LIMIT 1`, strings.Join(clauses, " OR ")), args...)
+		LIMIT 2`, strings.Join(clauses, " OR ")), args...)
 	if err != nil || len(rows) == 0 {
 		return nil, err
+	}
+	if len(rows) > 1 && (serverID == 0 || rowInt64(rows[0], "svr_id") != serverID) {
+		return nil, fmt.Errorf("voice lookup is ambiguous without an exact server_id")
 	}
 	data := rowBytes(rows[0], "voice_data")
 	if len(data) == 0 {
@@ -4807,7 +4849,7 @@ func writeVoiceTranscriptCache(path string, transcript map[string]any) map[strin
 		return nil
 	}
 	if data, err := json.MarshalIndent(transcript, "", "  "); err == nil {
-		_ = os.WriteFile(path, append(data, '\n'), 0o600)
+		_ = atomicPrivateWrite(path, append(data, '\n'))
 	}
 	return transcript
 }
@@ -4837,7 +4879,11 @@ func (s *server) decodeSILKVoiceToWAV(path string) (string, error) {
 	if st, err := os.Stat(wavPath); err == nil && !st.IsDir() && st.Size() > 44 {
 		return wavPath, nil
 	}
-	pcmPath := base + ".pcm"
+	pcmPath, err := createPrivatePCMTemp(path)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(pcmPath)
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, decoder, path, pcmPath)
@@ -4889,7 +4935,7 @@ func writePCM16LEMonoWAV(path string, pcm []byte, sampleRate int) error {
 	buf.WriteString("data")
 	_ = binary.Write(&buf, binary.LittleEndian, dataLen)
 	buf.Write(pcm)
-	return os.WriteFile(path, buf.Bytes(), 0o600)
+	return atomicPrivateWrite(path, buf.Bytes())
 }
 
 func runLocalVoiceASR(audioPath string) (text, engine, model string, err error) {
@@ -5232,7 +5278,7 @@ func quoteXMLReadHints(s *server, row wcdb.Row, p map[string]any) []map[string]a
 		}
 	case 34:
 		refRow := wcdb.Row{
-			"talker":      firstNonEmpty(stringMapValue(refer, "chatusr"), rowString(row, "talker")),
+			"talker":      firstNonEmpty(rowString(row, "talker"), stringMapValue(refer, "chatusr")),
 			"create_time": refCreateTime,
 			"base_kind":   int64(34),
 			"kind_name":   "voice",
@@ -5795,19 +5841,7 @@ func (s *server) resolveLooseSenderArg(a map[string]any) (string, error) {
 	if raw == "" || looksLikeRawChatID(raw) {
 		return raw, nil
 	}
-	db, err := s.openCacheIndex(false)
-	if err != nil {
-		return "", fmt.Errorf("sender %q requires cache index for display-name resolution; run `wechat-cli cache refresh` first or pass raw sender wxid", raw)
-	}
-	defer db.Close()
-	cands, err := resolveChatCandidates(db, raw, "", 1)
-	if err != nil {
-		return "", err
-	}
-	if len(cands) == 0 {
-		return "", fmt.Errorf("sender %q not found; pass raw sender wxid", raw)
-	}
-	return cands[0].Username, nil
+	return s.resolveLiveChat(raw, "")
 }
 
 func mediaKindWhere(kind, alias string) (string, []any, error) {
@@ -5861,7 +5895,7 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 	case "system":
 		return "(" + col + " & 4294967295) = ?", []any{int64(10000)}, nil
 	case "music":
-		return col + " = ?", []any{packedLocalType(49, 3)}, nil
+		return col + " IN (?, ?)", []any{packedLocalType(49, 3), packedLocalType(49, 76)}, nil
 	case "link":
 		return col + " IN (?, ?)", []any{packedLocalType(49, 5), packedLocalType(49, 49)}, nil
 	case "file":
@@ -5874,6 +5908,8 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 		return col + " = ?", []any{packedLocalType(49, 51)}, nil
 	case "quote":
 		return col + " = ?", []any{packedLocalType(49, 57)}, nil
+	case "solitaire":
+		return col + " = ?", []any{packedLocalType(49, 53)}, nil
 	case "pat":
 		return col + " = ?", []any{packedLocalType(49, 62)}, nil
 	case "announcement":
@@ -6732,8 +6768,12 @@ func (s *server) enrichSearchSender(rows []wcdb.Row) []string {
 		senderWxid string
 		baseKind   int32
 		kindName   string
+		createTime int64
+		serverID   int64
+		sortSeq    int64
+		shard      string
 	}
-	metaByKey := make(map[string]meta)
+	metaByKey := make(map[string][]meta)
 	failedLookups := 0
 	for talker, lids := range byTalker {
 		tableName := "Msg_" + talkerHash(talker)
@@ -6743,53 +6783,86 @@ func (s *server) enrichSearchSender(rows []wcdb.Row) []string {
 			continue
 		}
 		failedLookups += len(msgShardWarnings(shards))
-		ph := make([]string, len(lids))
-		args := make([]any, len(lids))
-		for i, lid := range lids {
-			ph[i] = "?"
-			args[i] = lid
-		}
+		lids = uniqueInt64s(lids)
 		for _, shard := range shards {
 			n2i, nameErr := loadName2Id(shard.DB)
 			if nameErr != nil {
 				failedLookups++
 			}
-			metaRows, qerr := shard.DB.Query(fmt.Sprintf(
-				"SELECT local_id, real_sender_id, local_type FROM %s WHERE local_id IN (%s)",
-				tableName, strings.Join(ph, ",")), args...)
-			if qerr != nil {
-				failedLookups++
-				continue
-			}
-			for _, mr := range metaRows {
-				lid, _ := mr["local_id"].(int64)
-				rsid, _ := mr["real_sender_id"].(int64)
-				lt, _ := mr["local_type"].(int64)
-				bk, _, name := wxkind.Unpack(lt)
-				m := meta{baseKind: bk, kindName: name}
-				if w, ok := n2i[rsid]; ok {
-					m.senderWxid = w
+			// Post-filter scans can contain 5000 hits for a single chat. Keep
+			// each query below SQLite's portable bound-parameter limit.
+			for start := 0; start < len(lids); start += 500 {
+				batch := lids[start:minInt(start+500, len(lids))]
+				ph := make([]string, len(batch))
+				args := make([]any, len(batch))
+				for i, lid := range batch {
+					ph[i], args[i] = "?", lid
 				}
-				metaByKey[talker+":"+strconv.FormatInt(lid, 10)] = m
+				metaRows, qerr := shard.DB.Query(fmt.Sprintf(
+					"SELECT local_id, real_sender_id, local_type, create_time, server_id, sort_seq FROM %s WHERE local_id IN (%s)",
+					quoteIdent(tableName), strings.Join(ph, ",")), args...)
+				if qerr != nil {
+					failedLookups++
+					continue
+				}
+				for _, mr := range metaRows {
+					lid, _ := mr["local_id"].(int64)
+					rsid, _ := mr["real_sender_id"].(int64)
+					lt, _ := mr["local_type"].(int64)
+					bk, _, name := wxkind.Unpack(lt)
+					m := meta{baseKind: bk, kindName: name, createTime: rowInt64(mr, "create_time"), serverID: rowInt64(mr, "server_id"), sortSeq: rowInt64(mr, "sort_seq"), shard: shard.Name}
+					if w, ok := n2i[rsid]; ok {
+						m.senderWxid = w
+					}
+					key := talker + ":" + strconv.FormatInt(lid, 10)
+					metaByKey[key] = append(metaByKey[key], m)
+				}
 			}
 		}
 		closeMsgDBs(shards)
 	}
+	missingMetadata := 0
 	for _, r := range rows {
 		t, _ := r["talker"].(string)
 		lid, _ := r["local_id"].(int64)
-		if m, ok := metaByKey[t+":"+strconv.FormatInt(lid, 10)]; ok {
+		var matched *meta
+		ambiguous := false
+		for _, candidate := range metaByKey[t+":"+strconv.FormatInt(lid, 10)] {
+			if timestamp := rowInt64(r, "create_time"); timestamp != 0 && candidate.createTime != timestamp {
+				continue
+			}
+			if matched != nil && *matched != candidate {
+				ambiguous = true
+				break
+			}
+			matched = &candidate
+		}
+		if matched != nil && !ambiguous {
+			m := *matched
 			if m.senderWxid != "" {
 				r["sender_wxid"] = m.senderWxid
 			}
 			r["base_kind"] = m.baseKind
 			r["kind_name"] = m.kindName
+			if m.serverID != 0 {
+				r["server_id"] = m.serverID
+				r["server_id_str"] = strconv.FormatInt(m.serverID, 10)
+			}
+			identity := wcdb.Row{"local_id": lid, "server_id": m.serverID, "sort_seq": m.sortSeq, "create_time": m.createTime}
+			s.attachMessageToken(t, m.shard, identity)
+			r["message_token"] = identity["message_token"]
+		} else {
+			missingMetadata++
 		}
 	}
+	var warnings []string
 	if failedLookups > 0 {
-		return []string{fmt.Sprintf("search_enrichment_partial:%d_lookup_errors", failedLookups)}
+		warnings = append(warnings, fmt.Sprintf("search_enrichment_partial:%d_lookup_errors", failedLookups))
 	}
-	return nil
+	if missingMetadata > 0 {
+		warnings = append(warnings, fmt.Sprintf("search_enrichment_partial:%d_missing_message_metadata", missingMetadata))
+	}
+	return warnings
 }
 
 func (s *server) toolSQL(a map[string]any) (any, error) {
@@ -8332,7 +8405,7 @@ func enrichMessages(rows []wcdb.Row) []wcdb.Row {
 				row["message_content_parsed"] = parsed
 			}
 		}
-		row["content_summary"] = contentSummary(baseKind, subtype, content, row["message_content_parsed"])
+		row["content_summary"] = contentSummary(baseKind, subtype, content, row["message_content_parsed"], rowString(row, "sender_wxid"))
 		if ct, ok := row["create_time"].(int64); ok && ct > 0 {
 			row["create_time_human"] = time.Unix(ct, 0).Format("2006-01-02 15:04:05")
 		}
@@ -8340,20 +8413,33 @@ func enrichMessages(rows []wcdb.Row) []wcdb.Row {
 	return rows
 }
 
-// senderPrefixRe matches a "wxid:\n" prefix attached to group-chat raw
-// content. WeChat stores group messages as "<senderWxid>:\n<actual text>";
-// this prefix is redundant once sender_wxid is exposed as its own field.
-// Anchored requirement of newline after ':' avoids stripping URLs (https://).
-var senderPrefixRe = regexp.MustCompile(`^\s*[a-zA-Z0-9_@-]+:\s*\r?\n\s*`)
+// Remove only a sender prefix verified by message metadata. A generic
+// "word:\n" pattern destroys ordinary text such as "Note:\n...". Preserve
+// all whitespace after the protocol's single newline as message content.
+func stripVerifiedSenderPrefix(raw, sender string) string {
+	if sender == "" {
+		return raw
+	}
+	trimmed := strings.TrimLeft(raw, " \t")
+	for _, newline := range []string{"\r\n", "\n"} {
+		if rest, ok := strings.CutPrefix(trimmed, sender+":"+newline); ok {
+			return rest
+		}
+	}
+	return raw
+}
 
 // contentSummary returns a one-line human-readable summary for display.
 // text/system → raw content (sender prefix stripped); media → bracketed
 // placeholder; app → title or quoted-reply composite. Depth-bounded implicitly
 // via parseMessageContent.
-func contentSummary(baseKind, subtype int32, raw string, parsed any) string {
+func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt ...string) string {
 	switch baseKind {
 	case 1:
-		return senderPrefixRe.ReplaceAllString(raw, "")
+		if len(senderOpt) > 0 {
+			return stripVerifiedSenderPrefix(raw, senderOpt[0])
+		}
+		return raw
 	case 3:
 		return "[图片]"
 	case 34:
@@ -8411,7 +8497,7 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any) string {
 						refSubtype = int32(n)
 					}
 				}
-				quoted = contentSummary(refType, refSubtype, refRaw, refParsed)
+				quoted = contentSummary(refType, refSubtype, refRaw, refParsed, stringMapValue(r, "fromusr"))
 			}
 			if title != "" {
 				return "[引用: " + quoted + "] " + title
@@ -8430,8 +8516,9 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any) string {
 	return fmt.Sprintf("[未知类型 base_kind=%d]", baseKind)
 }
 
-// selfWxid derives V's own wxid by stripping WeChat 4.x's _<4-hex> device
-// suffix from the config wxid. Returns empty if config wxid is unset.
+// Config normally stores the normalized account ID. Older wxkey configs can
+// store the entire account-directory name, including its device suffix; only
+// strip that suffix when DBRoot confirms this legacy representation.
 func (s *server) selfWxid() string {
 	if s == nil || s.cfg == nil {
 		return ""
@@ -8440,8 +8527,10 @@ func (s *server) selfWxid() string {
 	if raw == "" {
 		return ""
 	}
-	if i := strings.LastIndex(raw, "_"); i > 0 && len(raw)-i == 5 {
-		return raw[:i]
+	if s.cfg.DBRoot != "" && filepath.Base(filepath.Clean(s.cfg.DBRoot)) == raw {
+		if i := strings.LastIndex(raw, "_"); i > 0 && len(raw)-i == 5 && isHexString(raw[i+1:]) {
+			return raw[:i]
+		}
 	}
 	return raw
 }

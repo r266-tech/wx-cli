@@ -27,6 +27,9 @@ if ($Version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
 if ($sourceVersion -ne $Version) {
   throw "package version $Version does not match appVersion $sourceVersion"
 }
+if ($Version -notmatch '^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$') {
+  throw "Windows packages currently support explicit prerelease candidates only; stable acceptance is not configured"
+}
 if ($env:WECHAT_CLI_ALLOW_UNTAGGED_PACKAGE -ne "1") {
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
     throw "git is required to verify the release source tag"
@@ -149,12 +152,17 @@ if ([string]::IsNullOrWhiteSpace($WcdbLib) -or -not (Test-Path $WcdbLib)) {
 }
 Assert-PeAmd64 $WcdbLib
 Assert-WcdbDllExports $WcdbLib
+if (-not (Test-Path -LiteralPath "$WcdbLib.build-inputs.json" -PathType Leaf)) {
+  throw "WCDB build evidence missing; build the pinned DLL with scripts/build-windows-wcdb.ps1"
+}
 if (-not (Get-Command go -ErrorAction SilentlyContinue)) {
   throw "Go is required to build wechat-cli.exe"
 }
 
 $distRoot = Join-Path $SourceDir "dist"
 $dist = Join-Path $distRoot "wechat-cli-v$Version-windows-amd64"
+$zip = "$dist.zip"
+if (Test-Path -LiteralPath $zip) { throw "version archive already exists; refusing overwrite" }
 if (Test-Path $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
@@ -165,7 +173,9 @@ try {
   $env:CGO_ENABLED = "0"
   $env:GOOS = "windows"
   $env:GOARCH = "amd64"
-  & go build -trimpath -ldflags="-s -w" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wechat-cli
+  $sourceCommit = (& git rev-parse HEAD).Trim()
+  if ($LASTEXITCODE -ne 0 -or $sourceCommit -notmatch '^[0-9a-f]{40}$') { throw "source commit unavailable" }
+  & go build -trimpath -ldflags="-s -w -X main.sourceCommit=$sourceCommit" -o (Join-Path $dist "wechat-cli.exe") ./cmd/wechat-cli
   if ($LASTEXITCODE -ne 0) { throw "go build failed" }
 } finally {
   if ($null -eq $oldCgo) {
@@ -178,30 +188,26 @@ try {
 }
 Assert-PeAmd64 (Join-Path $dist "wechat-cli.exe")
 $versionEnvelope = & (Join-Path $dist "wechat-cli.exe") --version | ConvertFrom-Json
-if ($versionEnvelope.data.version -ne $Version) { throw "built CLI version does not match $Version" }
+if ($versionEnvelope.data.version -ne $Version -or $versionEnvelope.data.commit -ne $sourceCommit) { throw "built CLI identity does not match source" }
 
 Copy-Item -LiteralPath $WcdbLib -Destination (Join-Path $dist "libWCDB.dll") -Force
 Copy-Item README.md, llms.txt, LICENSE, SECURITY.md, THIRD_PARTY_NOTICES.md, AGENTS.md, install.ps1 -Destination $dist -Force
 New-Item -ItemType Directory -Force -Path (Join-Path $dist "scripts") | Out-Null
 Copy-Item -LiteralPath (Join-Path $SourceDir "scripts\install-release.ps1") -Destination (Join-Path $dist "scripts\install-release.ps1") -Force
 Copy-Item -LiteralPath (Join-Path $SourceDir "scripts\wechat-read-regression.sh") -Destination (Join-Path $dist "scripts\wechat-read-regression.sh") -Force
-Copy-Item -LiteralPath (Join-Path $SourceDir "scripts\release-manifest.py") -Destination (Join-Path $dist "scripts\release-manifest.py") -Force
 if (Test-Path (Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $dist "docs") | Out-Null
   Copy-Item -LiteralPath (Join-Path $SourceDir "docs\WINDOWS_USER_GUIDE.md") -Destination (Join-Path $dist "docs\WINDOWS_USER_GUIDE.md") -Force
 }
 
-$zip = Join-Path $distRoot "wechat-cli-v$Version-windows-amd64.zip"
 $latest = Join-Path $distRoot "wechat-cli-latest-windows-amd64.zip"
-if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
 if (Test-Path $latest) { Remove-Item -LiteralPath $latest -Force }
+# Generate provenance before freezing the ZIP; the macOS manifest writer needs
+# wxkey/dylib/notarization inputs that do not exist in a Windows package.
+& python (Join-Path $SourceDir "scripts\windows_manifest.py") $Version $dist "$WcdbLib.build-inputs.json"
+if ($LASTEXITCODE -ne 0) { throw "release manifest generation failed" }
 Compress-Archive -Path $dist -DestinationPath $zip -Force
 Copy-Item -LiteralPath $zip -Destination $latest -Force
-
-$manifestScript = Join-Path $SourceDir "scripts\release-manifest.py"
-$env:WECHAT_CLI_WCDB_VERSION = $env:WECHAT_CLI_WCDB_VERSION
-& python $manifestScript $Version "windows-amd64" $dist
-if ($LASTEXITCODE -ne 0) { throw "release manifest generation failed" }
 Write-Sha256Manifest -SourcePath $zip -ManifestPath "$zip.sha256" -FileName (Split-Path $zip -Leaf)
 Write-Sha256Manifest -SourcePath $latest -ManifestPath "$latest.sha256" -FileName (Split-Path $latest -Leaf)
 

@@ -4,11 +4,19 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/r266-tech/wx-cli/v2/internal/config"
+	"github.com/r266-tech/wx-cli/v2/internal/diagnostics"
+	"github.com/r266-tech/wx-cli/v2/internal/filelock"
+	"github.com/r266-tech/wx-cli/v2/internal/safefile"
 )
 
 const digestSourceSchemaVersion = 1
@@ -30,13 +38,36 @@ func (s *server) toolArchiveCreate(a map[string]any) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		root = filepath.Join(state, "archives", time.Now().Format("20060102-150405"))
+		root = filepath.Join(state, "archives", time.Now().Format("20060102-150405.000000000"))
 	}
 	root, err = filepath.Abs(filepath.Clean(root))
 	if err != nil {
 		return nil, err
 	}
 	if err := requirePrivateOutput(root, "archives", getBool(a, "confirm_external_output")); err != nil {
+		return nil, err
+	}
+	lockPath, err := archiveMutationLockPath(root)
+	if err != nil {
+		return nil, err
+	}
+	unlock, err := filelock.Acquire(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if info, err := os.Lstat(root); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("archive output must be a real directory")
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return nil, err
+		}
+		if len(entries) > 0 {
+			return nil, fmt.Errorf("archive output directory is not empty; choose a new snapshot directory")
+		}
+	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
 	if err := os.MkdirAll(root, 0o700); err != nil {
@@ -127,26 +158,14 @@ func fileSHA256(path string) string {
 	}
 	defer f.Close()
 	h := sha256.New()
-	buf := make([]byte, 128*1024)
-	for {
-		n, readErr := f.Read(buf)
-		if n > 0 {
-			_, _ = h.Write(buf[:n])
-		}
-		if readErr != nil {
-			break
-		}
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
 	}
 	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func redactArchiveError(value string) string {
-	for _, token := range []string{"salt ", "enc_key ", "wxid_"} {
-		if i := strings.Index(value, token); i >= 0 {
-			return value[:i] + "[redacted]"
-		}
-	}
-	return value
+	return diagnostics.Redact(value)
 }
 
 func (s *server) toolDigestSource(a map[string]any) (any, error) {
@@ -158,6 +177,9 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	if chat == "" && talker == "" {
 		return nil, fmt.Errorf("chat or talker is required")
 	}
+	if err := s.ensure(); err != nil {
+		return nil, err
+	}
 	limit := getInt(a, "limit", 5000)
 	if limit <= 0 {
 		limit = 5000
@@ -166,7 +188,7 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 		limit = 5000
 	}
 
-	args := copyToolArgs(a)
+	args := scopedDigestArgs(a, s.cfg)
 	resolvedTalker, err := s.resolveLooseChatArg(args)
 	if err != nil {
 		return nil, err
@@ -176,9 +198,16 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	args["view"] = "agent"
 	args["limit"] = int64(limit)
 	args["display_order"] = "asc"
-	if talker != "" {
-		args["talker"] = talker
+	folder, err := digestStateFolder(args)
+	if err != nil {
+		return nil, err
 	}
+	stateName := digestStateName(args)
+	unlock, err := filelock.Acquire(digestLockPath(folder))
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if since := getBool(a, "since_last"); since {
 		args["order"] = "asc"
 		previous, stateErr := loadDigestState(args)
@@ -186,10 +215,21 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 			return nil, fmt.Errorf("digest state invalid")
 		}
 		if stateErr == nil {
-			if previous.LocalID > 0 {
+			// Offset only selects the initial window. Reapplying it after an
+			// explicit saved cursor would skip another offset worth of messages.
+			args["offset"] = 0
+			if previous.MessageToken != "" {
+				for _, key := range []string{"after", "after_message", "after_local_id", "after_server_id_str", "since", "since_time"} {
+					delete(args, key)
+				}
+				args["after_message_token"] = previous.MessageToken
+			} else if previous.LocalID > 0 {
 				args["after_message"] = previous.LocalID
+				if previous.ServerID != "" {
+					args["after_server_id_str"] = previous.ServerID
+				}
 			} else if previous.Timestamp > 0 {
-				args["after"] = previous.Timestamp
+				args["after"] = fmt.Sprint(previous.Timestamp)
 			}
 		}
 	}
@@ -200,6 +240,10 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	payload, ok := result.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("timeline returned unexpected payload")
+	}
+	warnings, _ := payload["warnings"].([]string)
+	if err := requireCompleteMessageSource(warnings); err != nil {
+		return nil, err
 	}
 	messages, _ := payload["messages"].([]map[string]any)
 	if messages == nil {
@@ -220,11 +264,6 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	if query, ok := payload["query"].(map[string]any); ok {
 		name = firstNonEmpty(getStr(query, "display_name"), getStr(query, "talker"), name)
 	}
-	root, err := digestRoot(a)
-	if err != nil {
-		return nil, err
-	}
-	folder := filepath.Join(root, digestFolderName(resolvedTalker))
 	if err := os.MkdirAll(filepath.Join(folder, "sources"), 0o700); err != nil {
 		return nil, err
 	}
@@ -236,6 +275,7 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 		"schema_version": digestSourceSchemaVersion,
 		"generated_at":   time.Now().Format(time.RFC3339),
 		"source":         "wechat-cli",
+		"account":        args["_digest_account"],
 		"chat": map[string]any{
 			"query":        name,
 			"talker":       firstNonEmpty(getStr(args, "talker"), getStr(payload, "talker")),
@@ -262,14 +302,15 @@ func (s *server) toolDigestSource(a map[string]any) (any, error) {
 	if err := atomicPrivateWrite(mdPath, []byte(renderDigestMarkdown(name, stats, messages))); err != nil {
 		return nil, err
 	}
-	if latest := latestMessageCursor(messages); latest.Timestamp > 0 || latest.LocalID > 0 {
-		if err := saveDigestState(folder, latest); err != nil {
+	if latest := digestTimelineCursor(payload, messages); latest.MessageToken != "" || latest.Timestamp > 0 || latest.LocalID > 0 {
+		if err := saveDigestStateNamed(folder, stateName, latest); err != nil {
 			return nil, err
 		}
 	}
 	return map[string]any{
 		"schema_version":  digestSourceSchemaVersion,
 		"folder":          folder,
+		"checkpoint":      filepath.Join(folder, stateName),
 		"source_json":     jsonPath,
 		"source_markdown": mdPath,
 		"message_count":   len(messages),
@@ -295,7 +336,11 @@ func digestRoot(a map[string]any) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(state, "digests"), nil
+	path := filepath.Join(state, "digests")
+	if err := requirePrivateOutput(path, "digests", false); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func requirePrivateOutput(path, managedName string, confirmed bool) error {
@@ -303,18 +348,52 @@ func requirePrivateOutput(path, managedName string, confirmed bool) error {
 	if err != nil {
 		return err
 	}
-	managed, err := filepath.Abs(filepath.Join(state, managedName))
+	if confirmed {
+		return nil
+	}
+	resolvedState, err := resolveOutputPath(state)
 	if err != nil {
 		return err
 	}
-	clean, err := filepath.Abs(filepath.Clean(path))
+	managed := filepath.Join(resolvedState, managedName)
+	clean, err := resolveOutputPath(path)
 	if err != nil {
 		return err
 	}
-	if confirmed || pathWithin(managed, clean) {
+	if pathWithin(managed, clean) {
 		return nil
 	}
 	return fmt.Errorf("output is outside managed private %s; pass confirm_external_output=true", managedName)
+}
+
+func resolveOutputPath(path string) (string, error) {
+	path, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		// A dangling symlink is not a missing path that may be created safely.
+		if info, statErr := os.Lstat(path); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("output contains a dangling symbolic link")
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(path))
+		path = parent
+	}
 }
 
 func safeArchiveName(value string) string {
@@ -335,7 +414,11 @@ func safeArchiveName(value string) string {
 		name = "chat"
 	}
 	if len(name) > 120 {
-		name = name[:120]
+		end := 120
+		for !utf8.RuneStart(name[end]) {
+			end--
+		}
+		name = name[:end]
 	}
 	return name
 }
@@ -365,22 +448,22 @@ func atomicPrivateWrite(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	return safefile.Replace(tmpPath, path)
 }
 
 type digestCursor struct {
-	Timestamp int64  `json:"last_timestamp"`
-	LocalID   int64  `json:"last_local_id,omitempty"`
-	ServerID  string `json:"last_server_id,omitempty"`
+	MessageToken string `json:"last_message_token,omitempty"`
+	Timestamp    int64  `json:"last_timestamp"`
+	LocalID      int64  `json:"last_local_id,omitempty"`
+	ServerID     string `json:"last_server_id,omitempty"`
 }
 
 func loadDigestState(a map[string]any) (digestCursor, error) {
-	root, err := digestRoot(a)
+	folder, err := digestStateFolder(a)
 	if err != nil {
 		return digestCursor{}, err
 	}
-	name := digestFolderName(firstNonEmpty(getStr(a, "talker"), getStr(a, "chat"), "chat"))
-	b, err := os.ReadFile(filepath.Join(root, name, "state.json"))
+	b, err := os.ReadFile(filepath.Join(folder, digestStateName(a)))
 	if err != nil {
 		return digestCursor{}, err
 	}
@@ -392,17 +475,60 @@ func loadDigestState(a map[string]any) (digestCursor, error) {
 }
 
 func saveDigestState(folder string, cursor digestCursor) error {
+	return saveDigestStateNamed(folder, "state.json", cursor)
+}
+
+func saveDigestStateNamed(folder, name string, cursor digestCursor) error {
 	b, err := json.MarshalIndent(map[string]any{
-		"schema_version": 1,
-		"last_timestamp": cursor.Timestamp,
-		"last_local_id":  cursor.LocalID,
-		"last_server_id": cursor.ServerID,
-		"updated_at":     time.Now().Format(time.RFC3339),
+		"last_message_token": cursor.MessageToken,
+		"schema_version":     1,
+		"last_timestamp":     cursor.Timestamp,
+		"last_local_id":      cursor.LocalID,
+		"last_server_id":     cursor.ServerID,
+		"updated_at":         time.Now().Format(time.RFC3339),
 	}, "", "  ")
 	if err != nil {
 		return err
 	}
-	return atomicPrivateWrite(filepath.Join(folder, "state.json"), append(b, '\n'))
+	return atomicPrivateWrite(filepath.Join(folder, name), append(b, '\n'))
+}
+
+func scopedDigestArgs(a map[string]any, cfg *config.Config) map[string]any {
+	args := copyToolArgs(a)
+	account := sha256.Sum256([]byte(cfg.Wxid + "\x00" + filepath.Clean(cfg.DBRoot)))
+	args["_digest_account"] = fmt.Sprintf("%x", account[:12])
+	return args
+}
+
+func digestStateFolder(a map[string]any) (string, error) {
+	root, err := digestRoot(a)
+	if err != nil {
+		return "", err
+	}
+	identity := firstNonEmpty(getStr(a, "talker"), getStr(a, "chat"), "chat")
+	if account := getStr(a, "_digest_account"); account != "" {
+		identity = account + "\x00" + identity
+	}
+	return filepath.Join(root, digestFolderName(identity)), nil
+}
+
+func digestStateName(a map[string]any) string {
+	filters := map[string]any{}
+	for _, key := range []string{"after", "before", "since_time", "since", "keyword", "type", "kind_name", "base_kind", "sender", "from_me", "offset", "before_message", "before_local_id", "before_server_id_str", "before_message_token", "after_message", "after_local_id", "after_server_id_str", "after_message_token"} {
+		if value, exists := a[key]; exists && value != nil && fmt.Sprint(value) != "" {
+			filters[key] = value
+		}
+	}
+	if len(filters) == 0 {
+		return "state.json"
+	}
+	b, _ := json.Marshal(filters)
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("state-%x.json", sum[:12])
+}
+
+func digestLockPath(folder string) string {
+	return filepath.Join(filepath.Dir(folder), ".locks", filepath.Base(folder)+".lock")
 }
 
 func latestMessageTimestamp(messages []map[string]any) int64 {
@@ -434,14 +560,42 @@ func latestMessageCursor(messages []map[string]any) digestCursor {
 			localID = maxInt64(localID, int64Value(idMap["local_id"]))
 		}
 		if timestamp > latest.Timestamp || (timestamp == latest.Timestamp && localID > latest.LocalID) {
-			latest.Timestamp = timestamp
-			latest.LocalID = localID
+			latest = digestCursor{Timestamp: timestamp, LocalID: localID}
 			if idMap, ok := msg["id"].(map[string]any); ok {
 				latest.ServerID = getStr(idMap, "server_id_str")
+				latest.MessageToken = getStr(idMap, "message_token")
 			}
 		}
 	}
 	return latest
+}
+
+func digestTimelineCursor(payload map[string]any, messages []map[string]any) digestCursor {
+	// Timeline orders by sort_seq, which can differ from message timestamps.
+	// Its cursor is the only safe checkpoint for the next after_message query.
+	query, _ := payload["query"].(map[string]any)
+	cursor, _ := query["cursor"].(map[string]any)
+	localID := int64Value(cursor["next_after_message"])
+	serverID := getStr(cursor, "next_after_server_id_str")
+	if token := getStr(cursor, "next_after_message_token"); token != "" {
+		for _, message := range messages {
+			candidate := latestMessageCursor([]map[string]any{message})
+			if candidate.MessageToken == token {
+				return candidate
+			}
+		}
+		return digestCursor{MessageToken: token, LocalID: localID, ServerID: serverID}
+	}
+	if localID > 0 {
+		for _, message := range messages {
+			candidate := latestMessageCursor([]map[string]any{message})
+			if candidate.LocalID == localID && (serverID == "" || candidate.ServerID == serverID) {
+				return candidate
+			}
+		}
+		return digestCursor{LocalID: localID, ServerID: serverID}
+	}
+	return latestMessageCursor(messages)
 }
 
 func int64Value(value any) int64 {
@@ -533,6 +687,10 @@ func (s *server) toolArchiveValidate(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
 	manifestPath := filepath.Join(root, "archive-manifest.json")
 	info, err := os.Stat(manifestPath)
 	if err != nil || info.IsDir() {
@@ -550,15 +708,27 @@ func (s *server) toolArchiveValidate(a map[string]any) (any, error) {
 		return nil, fmt.Errorf("invalid archive manifest: %w", err)
 	}
 	results := make([]map[string]any, 0, len(manifest.Records))
-	valid := manifest.SchemaVersion == 1
+	valid := manifest.SchemaVersion == 1 && len(manifest.Records) > 0
+	seen := make(map[string]bool, len(manifest.Records))
 	for _, record := range manifest.Records {
 		rel := strings.TrimSpace(fmt.Sprint(record["path"]))
+		if record["status"] != "ok" {
+			results = append(results, map[string]any{"path": rel, "status": "error", "error": "source database was not archived successfully"})
+			valid = false
+			continue
+		}
 		if rel == "" || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || rel == ".." {
 			results = append(results, map[string]any{"path": rel, "status": "error", "error": "path escapes archive root"})
 			valid = false
 			continue
 		}
 		path := filepath.Join(root, filepath.FromSlash(rel))
+		if seen[path] {
+			results = append(results, map[string]any{"path": rel, "status": "error", "error": "duplicate archive path"})
+			valid = false
+			continue
+		}
+		seen[path] = true
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil || !pathWithin(root, resolved) {
 			results = append(results, map[string]any{"path": rel, "status": "error", "error": "file is missing or escapes archive root"})
@@ -567,7 +737,7 @@ func (s *server) toolArchiveValidate(a map[string]any) (any, error) {
 		}
 		want := strings.TrimSpace(fmt.Sprint(record["sha256"]))
 		got := fileSHA256(path)
-		match := want != "" && strings.EqualFold(want, got)
+		match := len(want) == 64 && got != "" && strings.EqualFold(want, got)
 		item := map[string]any{"path": rel, "sha256": got, "status": "ok"}
 		if !match {
 			item["status"] = "error"
@@ -597,7 +767,27 @@ func archiveBaseDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(state, "archives"), nil
+	root := filepath.Join(state, "archives")
+	if err := requirePrivateOutput(root, "archives", false); err != nil {
+		return "", err
+	}
+	return root, nil
+}
+
+func archiveMutationLockPath(root string) (string, error) {
+	resolved, err := resolveOutputPath(root)
+	if err != nil {
+		return "", err
+	}
+	if runtime.GOOS == "windows" {
+		resolved = strings.ToLower(resolved)
+	}
+	state, err := appStateDir()
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(resolved))
+	return filepath.Join(state, ".archive-locks", fmt.Sprintf("%x.lock", sum[:])), nil
 }
 
 func (s *server) toolArchiveList(a map[string]any) (any, error) {
@@ -650,15 +840,16 @@ func (s *server) toolArchiveDelete(a map[string]any) (any, error) {
 		return nil, err
 	}
 	src := filepath.Join(root, name)
+	unlock, err := lockManagedArchiveMutation(src, "archive")
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	if _, err := os.Stat(filepath.Join(src, "archive-manifest.json")); err != nil {
 		return nil, fmt.Errorf("archive not found: %s", name)
 	}
-	quarantineRoot := filepath.Join(root, ".quarantine")
-	if err := os.MkdirAll(quarantineRoot, 0o700); err != nil {
-		return nil, err
-	}
-	dst := filepath.Join(quarantineRoot, time.Now().Format("20060102-150405")+"-"+safeArchiveName(name))
-	if err := os.Rename(src, dst); err != nil {
+	dst, err := quarantineManagedFolder(root, src, "archive")
+	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"status": "quarantined", "from": src, "to": dst, "receipt": time.Now().Format(time.RFC3339)}, nil
@@ -677,34 +868,145 @@ func (s *server) toolArchiveRestore(a map[string]any) (any, error) {
 		return nil, err
 	}
 	src := filepath.Join(root, ".quarantine", name)
-	if _, err := os.Stat(src); err != nil {
+	if err := requirePrivateOutput(src, "archives", false); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(src)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("quarantined archive not found: %s", name)
 	}
-	dstName := name
-	if i := strings.Index(dstName, "-"); i >= 0 {
-		dstName = dstName[i+1:]
+	origin, err := loadQuarantineOrigin(src)
+	if err != nil {
+		return nil, err
 	}
-	dst := filepath.Join(root, safeArchiveName(dstName))
-	if _, err := os.Stat(dst); err == nil {
+	destinationRoot := root
+	if origin.Kind == "digest" {
+		destinationRoot, err = digestRoot(nil)
+		if err != nil {
+			return nil, err
+		}
+	}
+	dst := filepath.Join(destinationRoot, origin.Name)
+	unlock, err := lockManagedArchiveMutation(dst, origin.Kind)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if _, err := os.Lstat(dst); err == nil {
 		return nil, fmt.Errorf("archive destination already exists: %s", filepath.Base(dst))
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := os.MkdirAll(destinationRoot, 0o700); err != nil {
+		return nil, err
 	}
 	if err := os.Rename(src, dst); err != nil {
 		return nil, err
 	}
-	return map[string]any{"status": "restored", "from": src, "to": dst, "receipt": time.Now().Format(time.RFC3339)}, nil
+	_ = os.Remove(src + ".origin.json")
+	return map[string]any{"status": "restored", "kind": origin.Kind, "from": src, "to": dst, "receipt": time.Now().Format(time.RFC3339)}, nil
+}
+
+type quarantineOrigin struct {
+	SchemaVersion int    `json:"schema_version"`
+	Kind          string `json:"kind"`
+	Name          string `json:"original_name"`
+}
+
+func lockManagedArchiveMutation(path, kind string) (func(), error) {
+	if kind == "digest" {
+		return filelock.Acquire(digestLockPath(path))
+	}
+	lockPath, err := archiveMutationLockPath(path)
+	if err != nil {
+		return nil, err
+	}
+	return filelock.Acquire(lockPath)
+}
+
+func quarantineManagedFolder(archiveRoot, src, kind string) (string, error) {
+	if err := requirePrivateOutput(src, kind+"s", false); err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(src)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", fmt.Errorf("quarantine source must be a real directory")
+	}
+	root := filepath.Join(archiveRoot, ".quarantine")
+	if err := requirePrivateOutput(root, "archives", false); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return "", err
+	}
+	origin := quarantineOrigin{SchemaVersion: 1, Kind: kind, Name: filepath.Base(src)}
+	dst := filepath.Join(root, time.Now().Format("20060102-150405.000000000")+"-"+kind+"-"+safeArchiveName(origin.Name))
+	if _, err := os.Lstat(dst); !os.IsNotExist(err) {
+		return "", fmt.Errorf("quarantine destination already exists or is inaccessible")
+	}
+	b, err := json.Marshal(origin)
+	if err != nil {
+		return "", err
+	}
+	if err := atomicPrivateWrite(dst+".origin.json", append(b, '\n')); err != nil {
+		return "", err
+	}
+	if err := os.Rename(src, dst); err != nil {
+		_ = os.Remove(dst + ".origin.json")
+		return "", err
+	}
+	return dst, nil
+}
+
+func loadQuarantineOrigin(src string) (quarantineOrigin, error) {
+	var origin quarantineOrigin
+	b, err := os.ReadFile(src + ".origin.json")
+	if err == nil {
+		if json.Unmarshal(b, &origin) != nil || origin.SchemaVersion != 1 {
+			return origin, fmt.Errorf("invalid quarantine origin receipt")
+		}
+	} else if os.IsNotExist(err) {
+		// Before origin receipts existed, quarantine names had a full date and
+		// time prefix. Removing only the first '-' loses the original name.
+		name := filepath.Base(src)
+		if len(name) <= 16 || name[15] != '-' {
+			return origin, fmt.Errorf("quarantine origin receipt is missing")
+		}
+		if _, err := time.Parse("20060102-150405", name[:15]); err != nil {
+			return origin, fmt.Errorf("quarantine origin receipt is missing")
+		}
+		origin = quarantineOrigin{SchemaVersion: 1, Kind: "archive", Name: name[16:]}
+		if _, err := os.Stat(filepath.Join(src, "archive-manifest.json")); os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(src, "state.json")); err != nil {
+				return origin, fmt.Errorf("legacy quarantine kind could not be identified")
+			}
+			origin.Kind = "digest"
+		}
+	} else {
+		return origin, err
+	}
+	if (origin.Kind != "archive" && origin.Kind != "digest") || origin.Name == "" || strings.HasPrefix(origin.Name, ".") || filepath.Base(origin.Name) != origin.Name || strings.ContainsAny(origin.Name, "/\\") {
+		return origin, fmt.Errorf("invalid quarantine origin receipt")
+	}
+	return origin, nil
 }
 
 // toolArchiveRetention applies the bounded, recoverable retention policy. It never
 // scans outside the managed state root and permanently deletes nothing.
 func (s *server) toolArchiveRetention(a map[string]any) (any, error) {
-	state, err := appStateDir()
+	archiveRoot, err := archiveBaseDir()
+	if err != nil {
+		return nil, err
+	}
+	digestRoot, err := digestRoot(nil)
 	if err != nil {
 		return nil, err
 	}
 	now := time.Now()
-	archiveRoot := filepath.Join(state, "archives")
-	digestRoot := filepath.Join(state, "digests")
 	quarantineRoot := filepath.Join(archiveRoot, ".quarantine")
+	if err := requirePrivateOutput(quarantineRoot, "archives", false); err != nil {
+		return nil, err
+	}
 	apply := getBool(a, "apply")
 	if apply && strictReadOnlyMode() {
 		return nil, fmt.Errorf("strict_read_only: retention changes local files")
@@ -751,8 +1053,21 @@ func (s *server) toolArchiveRetention(a map[string]any) (any, error) {
 	moved := []map[string]any{}
 	if apply {
 		for _, c := range candidates {
-			dst := filepath.Join(quarantineRoot, now.Format("20060102-150405")+"-"+safeArchiveName(filepath.Base(c.Path)))
-			if err := os.Rename(c.Path, dst); err != nil {
+			unlock, err := lockManagedArchiveMutation(c.Path, c.Kind)
+			if err != nil {
+				return nil, err
+			}
+			info, err := os.Stat(c.Path)
+			if err != nil || now.Sub(info.ModTime()) <= 14*24*time.Hour {
+				unlock()
+				if err != nil {
+					return nil, err
+				}
+				continue
+			}
+			dst, err := quarantineManagedFolder(archiveRoot, c.Path, c.Kind)
+			unlock()
+			if err != nil {
 				return nil, err
 			}
 			moved = append(moved, map[string]any{"kind": c.Kind, "from": c.Path, "to": dst, "age_days": c.AgeDays})

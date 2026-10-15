@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "wechat-cli release version without leading v"
+        description: "wechat-cli candidate version without leading v (for example 2.0.1-rc.6)"
         required: true
       wcdb_version:
         description: "Tencent/WCDB release version without leading v"
@@ -34,6 +34,13 @@ jobs:
         shell: powershell
         run: |
           .\scripts\build-windows-wcdb.ps1 -WcdbVersion "${{ inputs.wcdb_version }}" -OutDir .\lib
+
+      - name: Exercise encrypted fixtures against the built WCDB
+        shell: powershell
+        run: |
+          $env:WECHAT_CLI_WCDB_LIB = (Resolve-Path .\lib\libWCDB.dll).Path
+          go test ./...
+          if ($LASTEXITCODE -ne 0) { throw 'encrypted database tests failed' }
 
       - name: Package wechat-cli for Windows
         shell: powershell
@@ -66,6 +73,15 @@ jobs:
               throw "standalone bootstrap checksum mismatch: $name"
             }
           }
+
+      - name: Exercise release manifest and archive validation
+        shell: powershell
+        run: |
+          .\scripts\test_windows_release.ps1
+          . .\scripts\install-release.ps1
+          $verified = Join-Path $env:RUNNER_TEMP 'wechat-cli-verified-package'
+          $package = Expand-VerifiedRelease ".\dist\wechat-cli-v${{ inputs.version }}-windows-amd64.zip" $verified "${{ inputs.version }}" $true
+          if (-not (Test-Path -LiteralPath (Join-Path $package 'release-manifest.json'))) { throw 'manifest missing from ZIP' }
 
       - name: Smoke installer from release zip
         shell: powershell

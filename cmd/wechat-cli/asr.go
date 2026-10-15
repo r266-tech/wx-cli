@@ -601,7 +601,11 @@ func (s *server) decodeSILKVoiceToWAVWithPysilk(path, python string) (string, er
 	if st, err := os.Stat(wavPath); err == nil && !st.IsDir() && st.Size() > 44 {
 		return wavPath, nil
 	}
-	pcmPath := base + ".pcm"
+	pcmPath, err := createPrivatePCMTemp(path)
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(pcmPath)
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
 	cmd := exec.CommandContext(ctx, python, "-c", pysilkDecodePythonScript, path, pcmPath)
@@ -618,6 +622,19 @@ func (s *server) decodeSILKVoiceToWAVWithPysilk(path, python string) (string, er
 		return "", err
 	}
 	return wavPath, nil
+}
+
+func createPrivatePCMTemp(voicePath string) (string, error) {
+	f, err := os.CreateTemp(filepath.Dir(voicePath), ".voice-*.pcm")
+	if err != nil {
+		return "", err
+	}
+	path := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
 }
 
 func runASRSetupCommand(name string, args ...string) ([]byte, error) {

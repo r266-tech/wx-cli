@@ -20,13 +20,13 @@
 
 ### macOS
 
-当前 macOS 预发布版为 **v2.0.1-rc.5**，直接发布在本源码仓库的 Releases。它采用 ad-hoc 签名，尚未经过 Apple 公证。安装或更新此预发布版：
+当前 macOS 预发布版为 **v2.0.1-rc.6**，直接发布在本源码仓库的 Releases。它采用 ad-hoc 签名，尚未经过 Apple 公证。安装或更新此预发布版：
 
 ```bash
-curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.5/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease
+curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.6/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.6 --allow-prerelease
 ```
 
-已有此预发布版时，可用 `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease`。预发布安装同样校验 checksum、manifest 和组件哈希；不会被稳定频道自动选中。完整归档仍可能因部分库缺密钥而失败，必须检查 `failed` 和校验结果。
+已有此预发布版时，可用 `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.6 --allow-prerelease`。预发布安装同样校验 checksum、manifest 和组件哈希；不会被稳定频道自动选中。完整归档仍可能因部分库缺密钥而失败，必须检查 `failed` 和校验结果。
 
 以下是独立 Release 仓库的稳定频道入口：
 
@@ -89,27 +89,40 @@ wechat-cli labels
 wechat-cli contacts --label "标签名" --limit 50
 ```
 
-`timeline` 默认查询最新消息，再按时间正序展示。继续翻旧消息时，优先使用 `data.query.cursor.next_before_message`：
+`timeline` 默认查询最新消息，再按时间正序展示。继续翻旧消息时，把 `data.query.cursor.next_before_message_token` 原样传回；向后续读使用 `next_after_message_token` / `--after-message-token`。消息的 `id.message_token` 同样可用于 `context` 或 `tail`，即使没有 server ID、不同分片的 local ID 重复也能定位：
 
 ```bash
-wechat-cli timeline "聊天名" --before-message 123 --limit 50
+wechat-cli timeline "聊天名" --before-message-token "$MESSAGE_TOKEN" --limit 50
 ```
 
 搜索后展开上下文：
 
 ```bash
 wechat-cli search "关键词" --in "聊天名" --limit 10
-wechat-cli context "聊天名" --local-id 123 --before-count 10 --after-count 10
+wechat-cli context "聊天名" --message-token "$MESSAGE_TOKEN" --before-count 10 --after-count 10
 wechat-cli search-context "关键词" --in "聊天名" --context-limit 3
 ```
 
 增量观察不会发消息，也不会控制微信 UI：
 
 ```bash
-wechat-cli tail "聊天名" --since-local-id 123
-wechat-cli tail "聊天名" --cursor local_id:456 --jsonl
+wechat-cli tail "聊天名" --cursor "$MESSAGE_TOKEN" --jsonl
 wechat-cli watch --mode sessions --jsonl --follow
 ```
+
+会话模式比较两次轮询的状态快照，可以观察纯未读数变化、同秒内保留下来的状态变化，以及会话新增和移除。它只表示轮询之间的净变化，不是完整事件日志：例如未读数在两次轮询之间从 1 变为 2 又回到 1，不会产生差异事件。首次调用返回最近窗口并为全部扫描到的会话建立基线（`query.initial_snapshot=true`）；扫描不完整时不推进游标，也不推断会话已移除。遇到 `session_scan_truncated` 可提高 `--scan-limit`（默认 5000，最大 100000）后用原游标重试；快照还受序列化大小上限约束，超限明确报错。
+
+会话事件保持 `type=session`，`change=added|updated|removed` 表示相对上一基线的差异；`session_id` 用于对应同一会话。`removed` 表示它离开当前筛选下的可见集合，不等同于微信数据被删除。首次窗口是当前快照，不代表刚新增的会话。
+
+`--cursor-storage auto` 是默认值：普通模式保存本机私有状态快照，返回短游标；严格只读模式自动使用不写游标状态文件的 `inline`。也可显式选择 `local` 或 `inline`，严格只读不接受 `local`。游标绑定账号与 `type_filter`、`keyword`、`unread_only` 筛选条件，续读时保持一致；可调整 `limit` 和 `scan_limit`，不支持非零 `offset`。旧时间戳游标可升级，但升级前发生的未读变化无法补回。inline 游标可能较长，可从 JSON 文件经 stdin 传入，避免命令行长度限制：
+
+```bash
+wechat-cli call-json tail < next-poll.json
+```
+
+`next-poll.json` 使用 `{"mode":"sessions","cursor":"<上次返回的完整 cursor>","cursor_storage":"inline"}`，并保留原筛选条件。`msg:v1` 消息 token 也应原样保存，不自行解析或拼接；它绑定账号、会话和原始消息位置。原锚点删除、迁移或排序/身份字段改变（包括未同步消息补齐 server ID）会返回 `message_cursor_stale`，此时重新读取 timeline 获取锚点；不能把 token 当作永久消息 ID。分片未完整可读时返回 `message_cursor_source_incomplete`，恢复可读后重试，不绕过游标继续推进。旧 `server_id_str` / `local_id` 参数继续支持；同传 token 与旧 ID 时必须一致。
+
+本机游标依赖私有快照文件；目前不会自动过期，历史变更快照会累计占用磁盘，文件缺失或损坏会明确报错，此时需要重新建立基线。快照只保存会话标识元数据和状态指纹，不保存聊天正文；没有变化时复用原快照。inline 游标使用批次检查点（`freshness.cursor_scope=batch`），应在处理完整批次后保存顶层 `cursor`；单个事件不会重复携带完整 inline 游标。本机模式可以保存每事件的短游标。重试旧游标可能重放事件，消费端应允许重试。
 
 每次调用都应检查：
 
@@ -134,7 +147,7 @@ stdout 默认是一行紧凑 JSON。人工查看加 `--pretty`。
 {"ok":false,"error":{"code":"tool_error","message":"...","next_action":"..."}}
 ```
 
-列表字段即使为空也保持为数组，适合 agent 稳定解析。只有 `tail/watch --jsonl` 与 `--follow` 输出 JSONL 事件流，不套标准 envelope。
+列表字段即使为空也保持为数组，适合 agent 稳定解析。只有 `tail/watch --jsonl` 与 `--follow` 输出 JSONL 事件流，不套标准 envelope。每批事件后追加一条 `type=checkpoint`，包含 `cursor/query/freshness/warnings`，空批次也有；消费端按 `type` 区分消息、会话和检查点，处理完批次后保存检查点游标。
 
 通用调用接口：
 
@@ -214,6 +227,7 @@ WECHAT_CLI_STRICT_READ_ONLY=1 wechat-cli agent --pretty
 - 图片解码与语音转写缓存
 - `cache refresh/rebuild`
 - `export`
+- Companion 附件上传和 CPU 问答（两者需要写入本地附件或运行文件；状态与聊天读取仍可用）
 
 ## 图片与语音
 

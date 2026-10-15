@@ -3,17 +3,20 @@
 package main
 
 import (
-	"os"
+	"errors"
+	"syscall"
 )
 
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	p, err := os.FindProcess(pid)
+	handle, err := syscall.OpenProcess(syscall.SYNCHRONIZE, false, uint32(pid))
 	if err != nil {
-		return false
+		// Lack of permission is not evidence that a lock owner exited.
+		return errors.Is(err, syscall.ERROR_ACCESS_DENIED)
 	}
-	defer p.Release()
-	return true
+	defer syscall.CloseHandle(handle)
+	state, err := syscall.WaitForSingleObject(handle, 0)
+	return err != nil || state != syscall.WAIT_OBJECT_0
 }

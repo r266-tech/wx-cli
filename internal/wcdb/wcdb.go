@@ -223,8 +223,22 @@ func (d *DB) BackupTo(dstPath string) error {
 	if err := os.MkdirAll(filepath.Dir(dstPath), 0o700); err != nil {
 		return err
 	}
-	tmp := dstPath + ".tmp"
-	_ = os.Remove(tmp)
+	// Reserve a private, unique file before SQLite writes any plaintext. A
+	// shared dstPath+".tmp" lets simultaneous snapshots truncate one another.
+	tempFile, err := os.CreateTemp(filepath.Dir(dstPath), ".snapshot-*.db")
+	if err != nil {
+		return err
+	}
+	tmp := tempFile.Name()
+	defer func() {
+		_ = os.Remove(tmp)
+		_ = os.Remove(tmp + "-wal")
+		_ = os.Remove(tmp + "-shm")
+		_ = os.Remove(tmp + "-journal")
+	}()
+	if err := tempFile.Close(); err != nil {
+		return err
+	}
 	dst, err := OpenPlain(tmp, true)
 	if err != nil {
 		return err
@@ -242,7 +256,6 @@ func (d *DB) BackupTo(dstPath string) error {
 		msg := errmsg(dst.handle)
 		dst.Close()
 		closeDst = false
-		_ = os.Remove(tmp)
 		if strings.Contains(msg, "encrypted") {
 			return d.exportPlaintextTo(tmp, dstPath)
 		}
@@ -279,9 +292,9 @@ func (d *DB) BackupTo(dstPath string) error {
 }
 
 func (d *DB) exportPlaintextTo(tmp, dstPath string) error {
-	_ = os.Remove(tmp)
-	_ = os.Remove(tmp + "-wal")
-	_ = os.Remove(tmp + "-shm")
+	if err := resetPrivateSnapshot(tmp); err != nil {
+		return err
+	}
 	sql := fmt.Sprintf(
 		"ATTACH DATABASE %s AS plaintext KEY ''; SELECT sqlcipher_export('plaintext'); DETACH DATABASE plaintext;",
 		sqlString(tmp),
@@ -296,9 +309,9 @@ func (d *DB) exportPlaintextTo(tmp, dstPath string) error {
 }
 
 func (d *DB) copyPlaintextTo(tmp, dstPath string, cause error) error {
-	_ = os.Remove(tmp)
-	_ = os.Remove(tmp + "-wal")
-	_ = os.Remove(tmp + "-shm")
+	if err := resetPrivateSnapshot(tmp); err != nil {
+		return err
+	}
 	dst, err := OpenPlain(tmp, true)
 	if err != nil {
 		return fmt.Errorf("%v; logical copy open dst: %w", cause, err)
@@ -356,6 +369,21 @@ func (d *DB) copyPlaintextTo(tmp, dstPath string, cause error) error {
 		return fmt.Errorf("%v; logical copy rename: %w", cause, err)
 	}
 	return nil
+}
+
+// Retain the reserved file's 0600 permissions across encrypted-backup
+// fallbacks; unlinking it would let SQLite recreate it with public permissions.
+func resetPrivateSnapshot(path string) error {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC, 0)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 func isSkippableSchemaError(sql string, err error) bool {
@@ -606,7 +634,12 @@ func readColumn(stmt uintptr, i int32) any {
 	case COL_FLOAT:
 		return sqlite3_column_double(stmt, i)
 	case COL_TEXT:
-		return readCString(sqlite3_column_text(stmt, i))
+		p := sqlite3_column_text(stmt, i)
+		n := sqlite3_column_bytes(stmt, i)
+		if p == nil || n == 0 {
+			return ""
+		}
+		return string(unsafe.Slice((*byte)(p), int(n)))
 	case COL_BLOB:
 		n := sqlite3_column_bytes(stmt, i)
 		if n == 0 {

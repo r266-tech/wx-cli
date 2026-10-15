@@ -31,6 +31,7 @@ jobs:
         run: |
           mkdir -p lib
           cp .build/libWCDB.dylib lib/libWCDB.dylib
+          export WECHAT_CLI_WCDB_LIB="$PWD/lib/libWCDB.dylib"
           go test ./...
           go test -race ./...
       - name: Build candidate

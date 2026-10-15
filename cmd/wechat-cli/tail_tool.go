@@ -41,6 +41,9 @@ func (s *server) readMessageEvents(a map[string]any) (any, error) {
 		return nil, err
 	}
 	env, _ := raw.(map[string]any)
+	if err := requireCompleteMessageSource(stringSliceAny(env["warnings"])); err != nil {
+		return nil, fmt.Errorf("message_cursor_source_incomplete: %w", err)
+	}
 	messages := mapSliceAny(env["messages"])
 	events := make([]map[string]any, 0, len(messages))
 	for _, msg := range messages {
@@ -83,21 +86,37 @@ func readMessageEventArgs(a map[string]any) (map[string]any, bool, error) {
 	if args["limit"] == nil {
 		args["limit"] = int64(50)
 	}
-	if v := firstNonEmpty(getStr(args, "since_time"), getStr(args, "since")); v != "" && args["after"] == nil {
-		args["after"] = v
-	}
-	if id, ok, err := int64Arg(args, "since_local_id"); err != nil {
-		return nil, false, err
-	} else if ok && args["after_message"] == nil {
-		args["after_message"] = id
-	}
-	if cursor := getStr(args, "cursor"); cursor != "" && args["after_message"] == nil && args["after"] == nil {
-		applyReadEventsCursor(args, cursor)
-		if args["after_message"] == nil && getStr(args, "after") == "" {
-			return nil, false, fmt.Errorf("invalid message cursor %q", cursor)
+	if cursor := getStr(args, "cursor"); cursor != "" {
+		// since_* establishes the first poll only. --follow reuses the same
+		// flags with each returned cursor, so those initial bounds must not
+		// override the cursor or replay the first batch indefinitely.
+		cursorArgs := map[string]any{}
+		if strings.HasPrefix(cursor, "msg:") {
+			if _, err := parseMessageToken(cursor); err != nil {
+				return nil, false, err
+			}
+		}
+		applyReadEventsCursor(cursorArgs, cursor)
+		if cursorArgs["after_message"] == nil && getStr(cursorArgs, "after_message_token") == "" && getStr(cursorArgs, "after_server_id_str") == "" && getStr(cursorArgs, "after") == "" {
+			return nil, false, fmt.Errorf("invalid message cursor")
+		}
+		for _, key := range []string{"since_local_id", "since_time", "since", "after", "after_message", "after_local_id", "after_message_token", "after_server_id_str"} {
+			delete(args, key)
+		}
+		for key, value := range cursorArgs {
+			args[key] = value
+		}
+	} else {
+		if v := firstNonEmpty(getStr(args, "since_time"), getStr(args, "since")); v != "" && args["after"] == nil {
+			args["after"] = v
+		}
+		if id, ok, err := int64Arg(args, "since_local_id"); err != nil {
+			return nil, false, err
+		} else if ok && args["after_message"] == nil {
+			args["after_message"] = id
 		}
 	}
-	catchUp := args["after_message"] != nil || getStr(args, "after") != ""
+	catchUp := args["after_message"] != nil || getStr(args, "after_message_token") != "" || getStr(args, "after_server_id_str") != "" || getStr(args, "after") != ""
 	if catchUp {
 		// Catch-up reads must take the oldest unseen rows first. Taking a DESC
 		// page and advancing to its newest row permanently skips the middle of a
@@ -114,20 +133,51 @@ func readMessageEventArgs(a map[string]any) (map[string]any, bool, error) {
 }
 
 func (s *server) readSessionEvents(a map[string]any) (any, error) {
+	storage, err := sessionCursorStorage(a)
+	if err != nil {
+		return nil, err
+	}
+	args, err := sessionTailArgs(a)
+	if err != nil {
+		return nil, err
+	}
 	limit := getInt(a, "limit", 50)
 	if limit <= 0 {
 		limit = 50
 	}
-	// Sessions has no offset/keyset API. Scan the full supported window by
-	// default so a cursor catches up from the oldest unseen session rather than
-	// sampling only the newest limit rows and skipping the middle.
 	scanLimit := getInt(a, "scan_limit", 5000)
+	if scanLimit <= 0 {
+		scanLimit = 5000
+	}
 	if scanLimit < limit {
 		scanLimit = limit
 	}
-	args := copyToolArgs(a)
+	if scanLimit > sessionCursorMaxStates || limit > sessionCursorMaxStates {
+		return nil, fmt.Errorf("session limit and scan_limit must not exceed %d", sessionCursorMaxStates)
+	}
+	if err := s.ensure(); err != nil {
+		return nil, err
+	}
+	binding := sessionCursorBinding(s.cfg, args)
+	inputCursor := strings.TrimSpace(getStr(a, "cursor"))
+	var previous *sessionStateCursor
+	var legacy *sessionReadEventsCursor
+	if isSessionStateCursor(inputCursor) {
+		cursor, err := readSessionStateCursor(inputCursor, binding)
+		if err != nil {
+			return nil, err
+		}
+		previous = &cursor
+	} else {
+		cursor, catchUp, err := readEventsSessionCursor(a)
+		if err != nil {
+			return nil, err
+		}
+		if catchUp {
+			legacy = &cursor
+		}
+	}
 	args["limit"] = int64(scanLimit + 1)
-
 	raw, err := s.toolSessions(args)
 	if err != nil {
 		return nil, err
@@ -137,53 +187,68 @@ func (s *server) readSessionEvents(a map[string]any) (any, error) {
 		return nil, fmt.Errorf("read_events internal error: sessions returned %T", raw)
 	}
 	freshness, warnings := cliRowsResultMetadata(raw)
-	cursor, catchUp, err := readEventsSessionCursor(a)
-	if err != nil {
-		return nil, err
+	if freshness == nil {
+		freshness = map[string]any{"message_source": "live_session_db"}
 	}
 	scanTruncated := len(rows) > scanLimit
+	blocked := scanTruncated || len(warnings) > 0 || getStr(freshness, "metadata_cache_status") == "degraded"
 	if scanTruncated {
-		rows = rows[:scanLimit]
 		warnings = appendUniqueStrings(warnings, "session_scan_truncated")
 	}
-	var events []map[string]any
-	hasMore := false
-	if scanTruncated && catchUp {
-		// The omitted rows may sit between the caller's cursor and this scan
-		// window. Returning newer rows would create an unrecoverable gap, so keep
-		// the cursor unchanged and report the bounded-scan condition instead.
-		events = make([]map[string]any, 0)
-		hasMore = true
-	} else {
-		events, hasMore = buildSessionEventBatch(rows, cursor, catchUp, limit)
+	if blocked {
+		warnings = appendUniqueStrings(warnings, "session_cursor_not_advanced")
 	}
-	if freshness == nil {
-		freshness = map[string]any{
-			"message_source":      "metadata_cache_sessions",
-			"metadata_cache_role": "session/unread observation",
+	if legacy != nil && !blocked {
+		warnings = appendUniqueStrings(warnings, "session_cursor_upgraded", "unread_changes_before_upgrade_unavailable")
+	}
+	events := []map[string]any{}
+	nextCursor := inputCursor
+	hasMore := blocked
+	if !blocked {
+		batch, err := buildSessionStateBatch(rows, binding, previous, legacy, limit)
+		if err != nil {
+			return nil, err
+		}
+		events, hasMore = batch.Events, batch.HasMore
+		prefix := ""
+		position := len(batch.Snapshot.Updates)
+		if previous != nil && len(events) == 0 && previous.Storage == storage {
+			prefix, position = previous.Prefix, previous.Applied
+		} else {
+			prefix, err = writeSessionSnapshot(batch.Snapshot, storage)
+			if err != nil {
+				return nil, err
+			}
+		}
+		nextCursor = sessionCursorAt(prefix, position)
+		for i, event := range events {
+			if storage == "local" {
+				event["cursor"] = sessionCursorAt(prefix, i+1)
+			} else {
+				event["cursor_position"] = i + 1
+			}
 		}
 	}
-	nextCursor := newestReadEventsCursor(events)
-	if nextCursor == "" {
-		nextCursor = encodeSessionReadEventsCursor(cursor)
+	freshness["observed_changes"] = "session_state_diff"
+	freshness["cursor_precision"] = "session_state_fingerprint"
+	freshness["unread_updates_tracked"] = true
+	freshness["change_semantics"] = "net_changes_between_polls"
+	freshness["cursor_scope"] = "event"
+	if storage == "inline" {
+		freshness["cursor_scope"] = "batch"
 	}
-	query := compactMap(map[string]any{
-		"mode":           "sessions",
-		"limit":          limit,
-		"scan_limit":     scanLimit,
-		"cursor":         getStr(a, "cursor"),
-		"returned":       len(events),
-		"has_more":       hasMore,
-		"scan_truncated": scanTruncated,
-	})
-	out := compactMap(map[string]any{
-		"query":     query,
-		"freshness": freshness,
-		"warnings":  warnings,
-		"cursor":    nextCursor,
-	})
-	// Event list shape is stable even when no new rows are available.
-	out["events"] = events
+	query := map[string]any{
+		"mode": "sessions", "limit": limit, "scan_limit": scanLimit,
+		"cursor_provided": inputCursor != "", "cursor_storage": storage,
+		"returned": len(events), "has_more": hasMore, "scan_truncated": scanTruncated,
+		"initial_snapshot": previous == nil && legacy == nil,
+		"type_filter":      getStr(args, "type_filter"), "unread_only": getBool(args, "unread_only"),
+	}
+	if keyword := getStr(args, "keyword"); keyword != "" {
+		query["keyword"] = keyword
+	}
+	out := compactMap(map[string]any{"query": query, "freshness": freshness, "warnings": warnings})
+	out["cursor"], out["events"] = nextCursor, events
 	return out, nil
 }
 
@@ -260,6 +325,14 @@ func sessionEventCandidateAfter(candidate sessionEventCandidate, cursor sessionR
 func applyReadEventsCursor(args map[string]any, cursor string) {
 	cursor = strings.TrimSpace(cursor)
 	switch {
+	case strings.HasPrefix(cursor, messageTokenPrefix):
+		if _, err := parseMessageToken(cursor); err == nil {
+			args["after_message_token"] = cursor
+		}
+	case strings.HasPrefix(cursor, "server_id:"):
+		if n, err := strconv.ParseInt(strings.TrimPrefix(cursor, "server_id:"), 10, 64); err == nil && n > 0 {
+			args["after_server_id_str"] = strconv.FormatInt(n, 10)
+		}
 	case strings.HasPrefix(cursor, "local_id:"):
 		if n, err := strconv.ParseInt(strings.TrimPrefix(cursor, "local_id:"), 10, 64); err == nil && n > 0 {
 			args["after_message"] = n
@@ -274,6 +347,12 @@ func applyReadEventsCursor(args map[string]any, cursor string) {
 }
 
 func readEventsCursorFromMessageID(id map[string]any) string {
+	if token := getStr(id, "message_token"); token != "" {
+		return token
+	}
+	if n, ok, err := int64Arg(id, "server_id_str"); err == nil && ok && n > 0 {
+		return fmt.Sprintf("server_id:%d", n)
+	}
 	if n := int64MapValue(id, "local_id"); n > 0 {
 		return fmt.Sprintf("local_id:%d", n)
 	}
@@ -283,6 +362,12 @@ func readEventsCursorFromMessageID(id map[string]any) string {
 func currentMessageReadEventsCursor(args map[string]any) string {
 	if cursor := getStr(args, "cursor"); cursor != "" {
 		return cursor
+	}
+	if token := getStr(args, "after_message_token"); token != "" {
+		return token
+	}
+	if id, ok, err := int64Arg(args, "after_server_id_str"); err == nil && ok && id > 0 {
+		return fmt.Sprintf("server_id:%d", id)
 	}
 	if id, ok, _ := int64Arg(args, "after_message"); ok && id > 0 {
 		return fmt.Sprintf("local_id:%d", id)
@@ -316,6 +401,9 @@ func readEventsSessionCursor(a map[string]any) (sessionReadEventsCursor, bool, e
 
 func parseSessionReadEventsCursor(raw string) (sessionReadEventsCursor, error) {
 	raw = strings.TrimSpace(raw)
+	if len(raw) > 4096 {
+		return sessionReadEventsCursor{}, fmt.Errorf("legacy session cursor exceeds the supported size")
+	}
 	if !strings.HasPrefix(raw, "session:") {
 		return sessionReadEventsCursor{}, fmt.Errorf("invalid session cursor %q", raw)
 	}

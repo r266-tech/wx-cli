@@ -7,11 +7,14 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from release_lib import sha256
+from release_lib import sha256, verify_acceptance_artifact
 
 ap=argparse.ArgumentParser();ap.add_argument('--package',required=True);ap.add_argument('--rollback-package',required=True);ap.add_argument('--receipt',required=True)
+ap.add_argument('--archive',help='Exact candidate ZIP; defaults to PACKAGE.zip beside the package directory.')
 a=ap.parse_args();package=Path(a.package).resolve();old=Path(a.rollback_package).resolve()
 receipt=json.loads(Path(a.receipt).read_text())
+archive=Path(a.archive).resolve() if a.archive else package.with_name(package.name+'.zip')
+verify_acceptance_artifact(archive,package=package,receipt=receipt)
 base=Path(tempfile.mkdtemp(prefix='wx-cli-install-rehearsal-'));base.chmod(0o700)
 home=base/'home';home.mkdir(mode=0o700)
 install=home/'.local/share/wechat-cli';bin_dir=home/'.local/bin';logs=home/'logs'

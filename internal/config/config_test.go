@@ -184,6 +184,22 @@ func TestUpdateMutationErrorLeavesConfigUnchanged(t *testing.T) {
 	}
 }
 
+func TestUpdateRejectsTrailingJSONWithoutOverwriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("WECHAT_CLI_CONFIG", path)
+	before := []byte(`{"wxid":"first"}{"keys":{"second":"value"}}`)
+	if err := os.WriteFile(path, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Update(func(cfg *Config) error { cfg.Wxid = "modified"; return nil }); err == nil {
+		t.Fatal("Update accepted a malformed multi-document config")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil || string(after) != string(before) {
+		t.Fatal("malformed config was overwritten")
+	}
+}
+
 func TestSaveRejectsConfigSymlink(t *testing.T) {
 	dir := t.TempDir()
 	target := filepath.Join(dir, "target.json")

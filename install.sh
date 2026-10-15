@@ -48,6 +48,33 @@ ASR_RAN=0
 INSTALL_STATUS="ok"
 BLOCKED_BY=""
 NEXT_ACTION=""
+INSTALL_TRANSACTION_DIR=""
+INSTALL_TRANSACTION_ACTIVE=0
+typeset -a INSTALL_TRANSACTION_FILES
+INSTALL_TRANSACTION_FILES=(wechat-cli wxkey libWCDB.dylib release-manifest.json .wechat-cli-install)
+
+cleanup_install_transaction() {
+  [[ -n "$INSTALL_TRANSACTION_DIR" ]] || return 0
+  local name backup restore_failed=0
+  if [[ "$INSTALL_TRANSACTION_ACTIVE" -eq 1 ]]; then
+    for name in "${INSTALL_TRANSACTION_FILES[@]}"; do
+      backup="$INSTALL_TRANSACTION_DIR/backup/$name"
+      if [[ -e "$backup" || -L "$backup" ]]; then
+        if ! mv -f "$backup" "$INSTALL_DIR/$name"; then
+          print -r -- "ERROR: could not restore $name after failed installation; backup retained in $INSTALL_TRANSACTION_DIR" >&2
+          restore_failed=1
+        fi
+      else
+        if ! rm -f "$INSTALL_DIR/$name"; then restore_failed=1; fi
+      fi
+    done
+  fi
+  [[ "$restore_failed" -eq 0 ]] || return 1
+  rm -rf "$INSTALL_TRANSACTION_DIR"
+  INSTALL_TRANSACTION_DIR=""
+  INSTALL_TRANSACTION_ACTIVE=0
+}
+trap cleanup_install_transaction EXIT
 
 typeset -a ACTIONS
 typeset -a WARNINGS
@@ -666,20 +693,20 @@ install_components() {
     return
   fi
 
-  mkdir -p "$INSTALL_DIR"
-  print -r -- "name=$APP_NAME" > "$INSTALL_DIR/$INSTALL_MARKER" || die "write install marker failed" 1
-
-  if [[ -f "$SOURCE_DIR/release-manifest.json" ]]; then
-    atomic_install_path "$SOURCE_DIR/release-manifest.json" "$INSTALL_DIR/release-manifest.json" 644 0 "release manifest"
-  fi
+  # Prepare every binary before replacing any installed component. Keep the
+  # rollback copies on the same filesystem so restoring them is an atomic move.
+  mkdir -p "${INSTALL_DIR:h}" || die "create install parent directory failed" 1
+  INSTALL_TRANSACTION_DIR="$(mktemp -d "${INSTALL_DIR:h}/.wechat-cli-stage.XXXXXX")" || die "create install staging directory failed" 1
+  local staged="$INSTALL_TRANSACTION_DIR/new" name
+  mkdir -p "$staged" "$INSTALL_TRANSACTION_DIR/backup" || die "prepare install staging failed" 1
   if [[ "$CLI_MODE" == "build" ]]; then
-    build_install_go_binary "$CLI_SOURCE" ./cmd/wechat-cli "$INSTALL_DIR/$APP_NAME" "$APP_NAME"
+    build_install_go_binary "$CLI_SOURCE" ./cmd/wechat-cli "$staged/$APP_NAME" "$APP_NAME"
   else
-    atomic_install_path "$CLI_SOURCE" "$INSTALL_DIR/$APP_NAME" 755 1 "$APP_NAME"
+    atomic_install_path "$CLI_SOURCE" "$staged/$APP_NAME" 755 1 "$APP_NAME"
   fi
 
   if [[ "$WXKEY_MODE" == "build" ]]; then
-    build_install_go_binary "$WXKEY_SOURCE" ./cmd/wxkey "$INSTALL_DIR/wxkey" "wxkey"
+    build_install_go_binary "$WXKEY_SOURCE" ./cmd/wxkey "$staged/wxkey" "wxkey"
   elif [[ "$WXKEY_MODE" == "go-install" ]]; then
     local gobin_tmp
     gobin_tmp="$(mktemp -d "${TMPDIR:-/tmp}/wechat-cli-gobin.XXXXXX")" || die "create temporary wxkey install dir failed" 1
@@ -687,15 +714,35 @@ install_components() {
       rm -rf "$gobin_tmp"
       die "install wxkey from GitHub failed; see $INSTALL_LOG" 1
     fi
-    atomic_install_path "$gobin_tmp/wxkey" "$INSTALL_DIR/wxkey" 755 1 "wxkey"
+    atomic_install_path "$gobin_tmp/wxkey" "$staged/wxkey" 755 1 "wxkey"
     rm -rf "$gobin_tmp"
   else
-    atomic_install_path "$WXKEY_SOURCE" "$INSTALL_DIR/wxkey" 755 1 "wxkey"
+    atomic_install_path "$WXKEY_SOURCE" "$staged/wxkey" 755 1 "wxkey"
   fi
 
-  if [[ "$LIB_SOURCE" != "$INSTALL_DIR/libWCDB.dylib" ]]; then
-    atomic_install_path "$LIB_SOURCE" "$INSTALL_DIR/libWCDB.dylib" 644 1 "libWCDB.dylib"
+  atomic_install_path "$LIB_SOURCE" "$staged/libWCDB.dylib" 644 1 "libWCDB.dylib"
+  if [[ -f "$SOURCE_DIR/release-manifest.json" ]]; then
+    atomic_install_path "$SOURCE_DIR/release-manifest.json" "$staged/release-manifest.json" 644 0 "release manifest"
   fi
+  print -r -- "name=$APP_NAME" > "$staged/$INSTALL_MARKER" || die "prepare install marker failed" 1
+  mkdir -p "$INSTALL_DIR" || die "create install directory failed" 1
+  for name in "${INSTALL_TRANSACTION_FILES[@]}"; do
+    [[ ! -d "$INSTALL_DIR/$name" ]] || die "component destination is a directory: $name" 1
+    if [[ -e "$INSTALL_DIR/$name" || -L "$INSTALL_DIR/$name" ]]; then
+      cp -pP "$INSTALL_DIR/$name" "$INSTALL_TRANSACTION_DIR/backup/$name" || die "backup installed component failed: $name" 1
+    fi
+  done
+  INSTALL_TRANSACTION_ACTIVE=1
+  for name in "${INSTALL_TRANSACTION_FILES[@]}"; do
+    if [[ -f "$staged/$name" ]]; then
+      mv -f "$staged/$name" "$INSTALL_DIR/$name" || die "replace installed component failed: $name" 1
+    else
+      # A source build must not inherit provenance from an older release.
+      rm -f "$INSTALL_DIR/$name" || die "remove stale component metadata failed: $name" 1
+    fi
+  done
+  INSTALL_TRANSACTION_ACTIVE=0
+  cleanup_install_transaction
 }
 
 install_cli_shim() {
@@ -717,7 +764,7 @@ install_cli_shim() {
 }
 
 update_source() {
-  if [[ -d "$SOURCE_DIR/.git" ]]; then
+  if [[ -e "$SOURCE_DIR/.git" ]]; then
     ACTIONS+=("git pull --ff-only in $SOURCE_DIR")
     if [[ "$DRY_RUN" -eq 1 ]]; then
       return
@@ -840,26 +887,12 @@ PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 INSTALL_DIR=$(shell_escape "$INSTALL_DIR")
 LOG_DIR="\$HOME/Library/Logs/wechat-cli"
 STATE_DIR="\$HOME/.wechat-cli"
-LOCK_DIR="\$STATE_DIR/cache-refresh.lock"
 LOG_FILE="\$LOG_DIR/cache-watcher.log"
 
 mkdir -p "\$LOG_DIR" "\$STATE_DIR"
 
-if ! mkdir "\$LOCK_DIR" 2>/dev/null; then
-  now=\$(date +%s)
-  mod=\$(stat -f %m "\$LOCK_DIR" 2>/dev/null || echo 0)
-  if [[ "\$mod" == <-> && \$((now - mod)) -gt 7200 ]]; then
-    rmdir "\$LOCK_DIR" 2>/dev/null || true
-    mkdir "\$LOCK_DIR" 2>/dev/null || exit 0
-  else
-    echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') skip: refresh already running" >> "\$LOG_FILE"
-    exit 0
-  fi
-fi
-trap 'rmdir "\$LOCK_DIR" 2>/dev/null || true' EXIT INT TERM
-
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh start" >> "\$LOG_FILE"
-WECHAT_CLI_CACHE_LOCK_HELD=1 "\$INSTALL_DIR/$APP_NAME" cache refresh >> "\$LOG_FILE" 2>&1
+"\$INSTALL_DIR/$APP_NAME" cache refresh >> "\$LOG_FILE" 2>&1
 rc=\$?
 echo "\$(date -u '+%Y-%m-%dT%H:%M:%SZ') cache refresh exit=\$rc" >> "\$LOG_FILE"
 exit "\$rc"
@@ -962,7 +995,9 @@ doctor() {
     fi
   fi
   if [[ -x "$INSTALL_DIR/$APP_NAME" ]]; then
-    if run_logged "$INSTALL_DIR/$APP_NAME" cache status; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      CHECKS+=("cache_status_skipped=dry_run")
+    elif env WECHAT_CLI_STRICT_READ_ONLY=1 "$INSTALL_DIR/$APP_NAME" cache status >/dev/null 2>&1; then
       CHECKS+=("cache_status_ok=true")
     else
       CHECKS+=("cache_status_ok=false")
@@ -1045,6 +1080,16 @@ remove_cli_shims() {
   done
 }
 
+is_installed_cli_command() {
+  local cmd="$1" binary
+  for binary in "$INSTALL_DIR/$APP_NAME" "$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME" "$LEGACY_INSTALL_DIR/$APP_NAME"; do
+    case "$cmd" in
+      "$binary"|"$binary "*) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 stop_installed_processes() {
   ACTIONS+=("stop running wechat-cli/wx-mcp processes from install dirs")
   if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -1056,22 +1101,14 @@ stop_installed_processes() {
     pid="${line%% *}"
     cmd="${line#${pid} }"
     [[ -n "$pid" && "$pid" != "$self" ]] || continue
-    case "$cmd" in
-      "$INSTALL_DIR/$APP_NAME"*|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"*|"$LEGACY_INSTALL_DIR/$APP_NAME"*)
-        kill "$pid" 2>/dev/null || true
-        ;;
-    esac
+    if is_installed_cli_command "$cmd"; then kill "$pid" 2>/dev/null || true; fi
   done < <(ps -axo pid=,command= 2>/dev/null | sed -E 's/^ *//')
   sleep 0.5
   while IFS= read -r line; do
     pid="${line%% *}"
     cmd="${line#${pid} }"
     [[ -n "$pid" && "$pid" != "$self" ]] || continue
-    case "$cmd" in
-      "$INSTALL_DIR/$APP_NAME"*|"$LEGACY_INSTALL_DIR/$LEGACY_APP_NAME"*|"$LEGACY_INSTALL_DIR/$APP_NAME"*)
-        kill -KILL "$pid" 2>/dev/null || true
-        ;;
-    esac
+    if is_installed_cli_command "$cmd"; then kill -KILL "$pid" 2>/dev/null || true; fi
   done < <(ps -axo pid=,command= 2>/dev/null | sed -E 's/^ *//')
 }
 
@@ -1167,4 +1204,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${ZSH_EVAL_CONTEXT:-}" != *:file ]]; then
+  main "$@"
+fi

@@ -12,6 +12,7 @@ type contextAnchorRef struct {
 	LocalID  int64
 	ServerID int64
 	Kind     string
+	Token    string
 }
 
 func (s *server) toolMessageContext(a map[string]any) (any, error) {
@@ -29,6 +30,11 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if ref.Token != "" {
+		if _, err := s.validateMessageTokenScope(ref.Token, talker); err != nil {
+			return nil, err
+		}
+	}
 	beforeCount := contextCountArg(a, "before_count", "before_messages", 20)
 	afterCount := contextCountArg(a, "after_count", "after_messages", 20)
 	includeAnchor := getBoolDefault(a, "include_anchor", true)
@@ -36,6 +42,9 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 	tableName := "Msg_" + talkerHash(talker)
 	shards, err := s.findMsgDBs(tableName)
 	if err != nil {
+		if ref.Token != "" {
+			return nil, fmt.Errorf("message_cursor_stale: original message source is unavailable: %w", err)
+		}
 		return nil, err
 	}
 	defer closeMsgDBs(shards)
@@ -54,9 +63,10 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	warnings = appendUniqueStrings(warnings, msgShardWarnings(shards)...)
 
-	sortLiveMessageRows(older, "sort_seq ASC, local_id ASC")
-	sortLiveMessageRows(newer, "sort_seq ASC, local_id ASC")
+	sortLiveMessageRows(older, "sort_seq ASC, local_id ASC, server_id ASC")
+	sortLiveMessageRows(newer, "sort_seq ASC, local_id ASC, server_id ASC")
 	rows := make([]wcdb.Row, 0, len(older)+len(newer)+1)
 	rows = append(rows, older...)
 	if includeAnchor {
@@ -65,7 +75,7 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 	}
 	rows = append(rows, newer...)
 	for _, r := range rows {
-		if rowInt64(r, "local_id") == rowInt64(anchor, "local_id") && rowInt64(r, "server_id") == rowInt64(anchor, "server_id") {
+		if rowInt64(r, "local_id") == rowInt64(anchor, "local_id") && rowInt64(r, "server_id") == rowInt64(anchor, "server_id") && rowString(r, "_message_shard") == rowString(anchor, "_message_shard") {
 			r["context_role"] = "anchor"
 		} else if contextRowBeforeAnchor(r, anchor) {
 			r["context_role"] = "before"
@@ -74,10 +84,13 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 		}
 	}
 	if getStr(a, "display_order") == "desc" {
-		sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC")
+		sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC, server_id DESC")
 	}
 	allRows := append([]wcdb.Row{anchor}, rows...)
 	setContextTalker(talker, allRows)
+	for _, row := range allRows {
+		s.attachMessageToken(talker, rowString(row, "_message_shard"), row)
+	}
 	if includeMediaPathsForMessages(a) {
 		if err := s.enrichMessageMediaResources(rows); err != nil {
 			mediaEnrichmentFailed = true
@@ -114,20 +127,26 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 func contextAnchorRefFromArgs(a map[string]any) (contextAnchorRef, error) {
 	ref, ok, err := contextAnchorRefFromKeys(a,
 		[]string{"local_id", "message_local_id", "around_local_id"},
-		[]string{"server_id_str", "message_server_id_str", "around_server_id_str", "server_id", "message_server_id", "around_server_id"})
+		[]string{"server_id_str", "message_server_id_str", "around_server_id_str", "server_id", "message_server_id", "around_server_id"}, "message_token")
 	if ok || err != nil {
 		return ref, err
 	}
-	return contextAnchorRef{}, fmt.Errorf("local_id or server_id is required")
+	return contextAnchorRef{}, fmt.Errorf("message_token, local_id or server_id is required")
 }
 
-func contextAnchorRefFromKeys(a map[string]any, localKeys, serverKeys []string) (contextAnchorRef, bool, error) {
+func contextAnchorRefFromKeys(a map[string]any, localKeys, serverKeys []string, tokenKeys ...string) (contextAnchorRef, bool, error) {
+	var ref contextAnchorRef
+	found := false
 	for _, key := range localKeys {
 		if n, ok, err := int64Arg(a, key); ok || err != nil {
 			if err == nil && n <= 0 {
 				err = fmt.Errorf("invalid argument %q: expected positive message id, got %d", key, n)
 			}
-			return contextAnchorRef{LocalID: n, Kind: key}, ok, err
+			if err != nil {
+				return ref, ok, err
+			}
+			ref.LocalID, ref.Kind, found = n, key, true
+			break
 		}
 	}
 	for _, key := range serverKeys {
@@ -135,10 +154,26 @@ func contextAnchorRefFromKeys(a map[string]any, localKeys, serverKeys []string) 
 			if err == nil && n <= 0 {
 				err = fmt.Errorf("invalid argument %q: expected positive message id, got %d", key, n)
 			}
-			return contextAnchorRef{ServerID: n, Kind: key}, ok, err
+			if err != nil {
+				return ref, ok, err
+			}
+			ref.ServerID, found = n, true
+			if ref.Kind == "" {
+				ref.Kind = key
+			}
+			break
 		}
 	}
-	return contextAnchorRef{}, false, nil
+	for _, key := range tokenKeys {
+		if raw := getStr(a, key); raw != "" {
+			if _, err := parseMessageToken(raw); err != nil {
+				return ref, true, err
+			}
+			ref.Token, ref.Kind, found = raw, key, true
+			break
+		}
+	}
+	return ref, found, nil
 }
 
 func contextCountArg(a map[string]any, primary, alias string, def int) int {
@@ -163,11 +198,11 @@ func messageBoundaryRefFromArgs(a map[string]any, direction string) (contextAnch
 	case "before":
 		return contextAnchorRefFromKeys(a,
 			[]string{"before_message", "before_message_local_id", "before_local_id", "before_message_id"},
-			[]string{"before_server_id_str", "before_message_server_id_str", "before_server_id", "before_message_server_id"})
+			[]string{"before_server_id_str", "before_message_server_id_str", "before_server_id", "before_message_server_id"}, "before_message_token")
 	case "after":
 		return contextAnchorRefFromKeys(a,
 			[]string{"after_message", "after_message_local_id", "after_local_id", "after_message_id", "since_local_id", "since_message"},
-			[]string{"after_server_id_str", "after_message_server_id_str", "after_server_id", "after_message_server_id"})
+			[]string{"after_server_id_str", "after_message_server_id_str", "after_server_id", "after_message_server_id"}, "after_message_token")
 	default:
 		return contextAnchorRef{}, false, fmt.Errorf("invalid message boundary direction %q", direction)
 	}
@@ -178,6 +213,9 @@ func messageBoundaryQueryValue(a map[string]any, direction string) string {
 	if !ok || err != nil {
 		return ""
 	}
+	if ref.Token != "" {
+		return ref.Token
+	}
 	if ref.LocalID > 0 {
 		return fmt.Sprintf("local_id:%d", ref.LocalID)
 	}
@@ -187,60 +225,59 @@ func messageBoundaryQueryValue(a map[string]any, direction string) string {
 	return ""
 }
 
-func messageBoundaryWhere(anchor wcdb.Row, direction string) (string, []any, error) {
+func messageBoundaryWhere(anchor wcdb.Row, direction string, shardOpt ...string) (string, []any, error) {
 	sortSeq := rowInt64(anchor, "sort_seq")
 	localID := rowInt64(anchor, "local_id")
-	switch direction {
-	case "before":
-		return "(sort_seq < ? OR (sort_seq = ? AND local_id < ?))", []any{sortSeq, sortSeq, localID}, nil
-	case "after":
-		return "(sort_seq > ? OR (sort_seq = ? AND local_id > ?))", []any{sortSeq, sortSeq, localID}, nil
-	default:
+	serverID := rowInt64(anchor, "server_id")
+	op := "<"
+	if direction == "after" {
+		op = ">"
+	} else if direction != "before" {
 		return "", nil, fmt.Errorf("invalid message boundary direction %q", direction)
 	}
-}
-
-func (s *server) appendMessageBoundaryWhere(a map[string]any, shards []msgShardDB, tableName string, where *[]string, args *[]any) error {
-	for _, direction := range []string{"before", "after"} {
-		ref, ok, err := messageBoundaryRefFromArgs(a, direction)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		anchor, err := s.findContextAnchorRow(shards, tableName, ref)
-		if err != nil {
-			return fmt.Errorf("%s_message anchor: %w", direction, err)
-		}
-		wc, wcArgs, err := messageBoundaryWhere(anchor, direction)
-		if err != nil {
-			return err
-		}
-		*where = append(*where, wc)
-		*args = append(*args, wcArgs...)
+	args := []any{sortSeq, sortSeq, localID, localID, serverID}
+	serverWhere := "COALESCE(server_id, 0) " + op + " ?"
+	if len(shardOpt) > 0 && rowString(anchor, "_message_shard") != "" {
+		serverWhere = "(" + serverWhere + " OR (COALESCE(server_id, 0) = ? AND ? " + op + " ?))"
+		args = append(args, serverID, shardOpt[0], rowString(anchor, "_message_shard"))
 	}
-	return nil
+	return "(sort_seq " + op + " ? OR (sort_seq = ? AND (local_id " + op + " ? OR (local_id = ? AND " + serverWhere + "))))", args, nil
 }
 
 func (s *server) findContextAnchorRow(shards []msgShardDB, tableName string, ref contextAnchorRef) (wcdb.Row, error) {
+	if ref.Token != "" {
+		return s.findMessageTokenAnchor(shards, tableName, ref)
+	}
 	var where string
 	var args []any
 	if ref.LocalID != 0 {
 		where = "local_id = ?"
 		args = append(args, ref.LocalID)
+		if ref.ServerID != 0 {
+			where += " AND server_id = ?"
+			args = append(args, ref.ServerID)
+		}
 	} else {
 		where = "server_id = ?"
 		args = append(args, ref.ServerID)
 	}
-	rows, err := s.queryContextRows(shards, tableName, where, args, "sort_seq DESC, local_id DESC", 10)
+	rows, err := s.queryContextRows(shards, tableName, where, args, "sort_seq DESC, local_id DESC, server_id DESC", 10)
 	if err != nil {
 		return nil, err
 	}
 	if len(rows) == 0 {
 		return nil, fmt.Errorf("anchor message not found for %s", ref.Kind)
 	}
-	sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC")
+	sortLiveMessageRows(rows, "sort_seq DESC, local_id DESC, server_id DESC")
+	for _, row := range rows[1:] {
+		if rowInt64(row, "local_id") != rowInt64(rows[0], "local_id") ||
+			rowInt64(row, "server_id") != rowInt64(rows[0], "server_id") ||
+			rowInt64(row, "sort_seq") != rowInt64(rows[0], "sort_seq") ||
+			rowInt64(row, "create_time") != rowInt64(rows[0], "create_time") ||
+			rowString(row, "_message_shard") != rowString(rows[0], "_message_shard") {
+			return nil, fmt.Errorf("anchor message is ambiguous across message shards for %s; pass its message_token or an unambiguous server_id_str together with local_id", ref.Kind)
+		}
+	}
 	return rows[0], nil
 }
 
@@ -248,24 +285,26 @@ func (s *server) contextWindowRows(shards []msgShardDB, tableName string, anchor
 	if limit <= 0 {
 		return nil, nil
 	}
-	var where, order string
-	var args []any
-	var err error
+	var order string
 	switch direction {
 	case "before":
-		order = "sort_seq DESC, local_id DESC"
+		order = "sort_seq DESC, local_id DESC, server_id DESC"
 	case "after":
-		order = "sort_seq ASC, local_id ASC"
+		order = "sort_seq ASC, local_id ASC, server_id ASC"
 	default:
 		return nil, fmt.Errorf("invalid context direction %q", direction)
 	}
-	where, args, err = messageBoundaryWhere(anchor, direction)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := s.queryContextRows(shards, tableName, where, args, order, limit)
-	if err != nil {
-		return nil, err
+	var rows []wcdb.Row
+	for i, shard := range shards {
+		where, args, err := messageBoundaryWhere(anchor, direction, shard.Name)
+		if err != nil {
+			return nil, err
+		}
+		batch, err := s.queryContextRows(shards[i:i+1], tableName, where, args, order, limit)
+		if err != nil {
+			return nil, err
+		}
+		rows = append(rows, batch...)
 	}
 	sortLiveMessageRows(rows, order)
 	if len(rows) > limit {
@@ -280,7 +319,7 @@ func (s *server) queryContextRows(shards []msgShardDB, tableName, where string, 
 	if shardLimit <= 0 {
 		shardLimit = 1
 	}
-	for _, shard := range shards {
+	for i, shard := range shards {
 		qargs := append([]any(nil), args...)
 		qargs = append(qargs, shardLimit)
 		shardRows, err := shard.DB.Query(fmt.Sprintf(`SELECT local_id, server_id, local_type, sort_seq,
@@ -290,9 +329,15 @@ func (s *server) queryContextRows(shards []msgShardDB, tableName, where string, 
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", shard.Name, err)
 		}
-		n2i, _ := loadName2Id(shard.DB)
+		n2i, nameErr := loadName2Id(shard.DB)
+		if nameErr != nil {
+			shards[i].Warnings = appendUniqueStrings(shards[i].Warnings, "sender_metadata_unavailable: "+shard.Name)
+		}
 		if n2i != nil {
 			shardRows = resolveSenders(shardRows, n2i)
+		}
+		for _, row := range shardRows {
+			row["_message_shard"] = shard.Name
 		}
 		rows = append(rows, shardRows...)
 	}
@@ -342,29 +387,16 @@ func setContextTalker(talker string, rows []wcdb.Row) {
 }
 
 func contextRowBeforeAnchor(row, anchor wcdb.Row) bool {
-	rs := rowInt64(row, "sort_seq")
-	as := rowInt64(anchor, "sort_seq")
-	if rs != as {
-		return rs < as
-	}
-	return rowInt64(row, "local_id") < rowInt64(anchor, "local_id")
+	return messageRowLess(row, anchor)
 }
 
 func attachContextRoles(messages []map[string]any, rows []wcdb.Row) {
-	roleByID := map[int64]string{}
-	for _, r := range rows {
-		if role := rowString(r, "context_role"); role != "" {
-			roleByID[rowInt64(r, "local_id")] = role
-		}
-	}
-	for _, msg := range messages {
-		id, _ := msg["id"].(map[string]any)
-		if id == nil {
-			continue
-		}
-		localID, _ := integerArgValue(id["local_id"])
-		if role := roleByID[localID]; role != "" {
-			msg["context_role"] = role
+	// agentMessages preserves row order; local IDs can be reused across shards.
+	for i, msg := range messages {
+		if i < len(rows) {
+			if role := rowString(rows[i], "context_role"); role != "" {
+				msg["context_role"] = role
+			}
 		}
 	}
 }

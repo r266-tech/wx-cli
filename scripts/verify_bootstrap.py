@@ -16,9 +16,14 @@ def verify_and_extract(archive, destination, expected_version, allow_prerelease=
         names=set();roots=set()
         for i in infos:
             p=PurePosixPath(i.filename)
-            if p.is_absolute() or '..' in p.parts or '\\' in i.filename or ':' in i.filename or stat.S_ISLNK(i.external_attr>>16):raise ValueError('unsafe release path')
-            if i.filename in names:raise ValueError('duplicate release path')
-            names.add(i.filename);roots.add(p.parts[0])
+            if (not p.parts or p.is_absolute() or '..' in p.parts or '\\' in i.filename or ':' in i.filename
+                    or str(p) != i.filename.rstrip('/') or stat.S_ISLNK(i.external_attr>>16)):
+                raise ValueError('unsafe release path')
+            # macOS defaults to a case-insensitive filesystem; also reject a
+            # directory/file alias before extraction can replace verified bytes.
+            key=str(p).casefold()
+            if key in names:raise ValueError('duplicate release path')
+            names.add(key);roots.add(p.parts[0])
         if len(roots)!=1:raise ValueError('expected one release root')
         prefix=roots.pop()+'/'
         d=json.loads(z.read(prefix+'release-manifest.json'))

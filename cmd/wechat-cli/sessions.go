@@ -15,8 +15,15 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		return nil, err
 	}
 	defer db.Close()
+	// Type filtering may require several source pages. Keep those pages in one
+	// read transaction so concurrent session reordering cannot shift offsets.
+	if err := db.Exec("BEGIN"); err != nil {
+		return nil, fmt.Errorf("session snapshot: %w", err)
+	}
+	defer db.Exec("ROLLBACK")
 	var where []string
 	var args []any
+	var warnings []string
 	where = append(where, "COALESCE(is_hidden, 0) = 0")
 	if getBool(a, "unread_only") {
 		where = append(where, "unread_count > 0")
@@ -39,7 +46,12 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 	if kw := getStr(a, "keyword"); kw != "" {
 		// Cross-db: also include sessions whose talker matches display_name /
 		// nick_name / remark / alias in contact.db (fuzzy, case+space insensitive).
-		matched := s.findUsernamesByFuzzyName(kw)
+		matched, lookupErr := s.findSessionUsernamesByFuzzyName(kw)
+		if lookupErr != nil {
+			// Even an empty session result must disclose a failed contact-name
+			// lookup; state-diff consumers must not treat it as a real removal.
+			warnings = appendUniqueStrings(warnings, "session_contact_lookup_unavailable")
+		}
 		clauses := []string{"username LIKE ? COLLATE NOCASE", "summary LIKE ? COLLATE NOCASE"}
 		like := "%" + kw + "%"
 		args = append(args, like, like)
@@ -61,7 +73,6 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		WHERE %s
 		ORDER BY sort_timestamp DESC, username DESC
 		LIMIT ? OFFSET ?`, strings.Join(where, " AND "))
-	var warnings []string
 	rows, err := collectSessionPage(getInt(a, "limit", 50), getInt(a, "offset", 0), typeFilter, func(fetchLimit, scanOffset int) ([]wcdb.Row, error) {
 		queryArgs := append(append([]any(nil), args...), fetchLimit, scanOffset)
 		batch, err := db.Query(query, queryArgs...)
@@ -91,6 +102,32 @@ func (s *server) toolSessions(a map[string]any) (any, error) {
 		}
 	}
 	return sessionRowsResult(rows, "live_session_db", warnings), nil
+}
+
+func (s *server) findSessionUsernamesByFuzzyName(keyword string) ([]string, error) {
+	db, err := s.openDB("contact", "contact.db")
+	if err != nil {
+		return nil, err
+	}
+	defer db.Close()
+	like := "%" + keyword + "%"
+	likeNoSpace := "%" + strings.ReplaceAll(keyword, " ", "") + "%"
+	rows, err := db.Query(`SELECT username FROM contact WHERE
+		nick_name LIKE ? COLLATE NOCASE
+		OR REPLACE(nick_name, ' ', '') LIKE ? COLLATE NOCASE
+		OR remark LIKE ? COLLATE NOCASE
+		OR REPLACE(remark, ' ', '') LIKE ? COLLATE NOCASE
+		OR alias LIKE ? COLLATE NOCASE`, like, likeNoSpace, like, likeNoSpace, like)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if name := rowString(row, "username"); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 func (s *server) enrichSessionContacts(rows []wcdb.Row) []string {

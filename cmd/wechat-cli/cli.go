@@ -92,9 +92,9 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "contacts", Tool: "contacts", Usage: appName + " contacts [--keyword 李] [--label 客户|--label-id 5]", Examples: []string{appName + " contacts --keyword 李 --limit 20", appName + ` contacts --label "$LABEL" --limit 50`}},
 	{Command: "labels", Aliases: []string{"contact-labels", "contact_labels", "contact-tags", "contact_tags"}, Tool: "contact_labels", Usage: appName + " labels [--keyword 客户]", Description: "List contact labels and membership counts. Use contacts --label/--label-id to list members.", Examples: []string{appName + " labels", appName + ` contacts --label "$LABEL" --limit 50`}},
 	{Command: "history", Aliases: []string{"messages"}, Tool: "messages", Usage: appName + " history <chat> [--limit 50] [--after 2026-05-11] [--view agent]", Positional: "chat", Examples: []string{appName + ` history "$CHAT" --view agent --limit 50`}},
-	{Command: "timeline", Aliases: []string{"chat-timeline", "chat_timeline", "conversation-view", "conversation_view"}, Tool: "chat_timeline", Usage: appName + " timeline <chat> [--limit 10] [--display-order asc]", Positional: "chat", Examples: []string{appName + ` timeline "$CHAT" --limit 20`, appName + ` timeline "$CHAT" --limit 20 --before-message "$CURSOR"`}},
-	{Command: "context", Aliases: []string{"message-context", "message_context", "around"}, Tool: "message_context", Usage: appName + " context <chat> --local-id 123 [--before-count 20] [--after-count 20]", Positional: "chat", Examples: []string{appName + ` context "$CHAT" --local-id 123 --before-count 10 --after-count 10`, appName + ` context "$CHAT" --server-id-str 9876543210 --pretty`}},
-	{Command: "tail", Aliases: []string{"watch", "observe", "events"}, Tool: "read_events", Usage: appName + " tail [chat] [--since-local-id 123] [--jsonl] [--follow]", Positional: "chat", Description: "Read-only event tail for agents. Normal mode returns the standard envelope; --jsonl/--follow emit newline-delimited event objects.", Examples: []string{appName + ` tail "$CHAT" --since-local-id 123`, appName + ` tail "$CHAT" --since-local-id 123 --jsonl`, appName + " watch --mode sessions --jsonl --follow"}},
+	{Command: "timeline", Aliases: []string{"chat-timeline", "chat_timeline", "conversation-view", "conversation_view"}, Tool: "chat_timeline", Usage: appName + " timeline <chat> [--limit 10] [--display-order asc]", Positional: "chat", Examples: []string{appName + ` timeline "$CHAT" --limit 20`, appName + ` timeline "$CHAT" --limit 20 --before-message-token "$CURSOR"`}},
+	{Command: "context", Aliases: []string{"message-context", "message_context", "around"}, Tool: "message_context", Usage: appName + " context <chat> --message-token TOKEN [--before-count 20] [--after-count 20]", Positional: "chat", Examples: []string{appName + ` context "$CHAT" --local-id 123 --before-count 10 --after-count 10`, appName + ` context "$CHAT" --server-id-str 9876543210 --pretty`}},
+	{Command: "tail", Aliases: []string{"watch", "observe", "events"}, Tool: "read_events", Usage: appName + " tail [chat] [--since-local-id 123] [--jsonl] [--follow]", Positional: "chat", Description: "Read-only event tail for agents. Normal mode returns the standard envelope; --jsonl/--follow emit newline-delimited events followed by a batch checkpoint.", Examples: []string{appName + ` tail "$CHAT" --since-local-id 123`, appName + ` tail "$CHAT" --since-local-id 123 --jsonl`, appName + " watch --mode sessions --jsonl --follow"}},
 	{Command: "media", Aliases: []string{"media-resources", "media_resources", "attachments"}, Tool: "media_resources", Usage: appName + " media <chat> [--local-id 123] [--type image|video|file]", Positional: "chat", Examples: []string{appName + ` media "$CHAT" --local-id 10`, appName + ` media "$CHAT" --type image --limit 20`}},
 	{Command: "search", Tool: "search", Usage: appName + " search <keyword> [--in <chat>] [--after 2026-01-01] [--type text]", Positional: "keyword", Examples: []string{appName + ` search "$KEYWORD" --in "$CHAT" --limit 10`}},
 	{Command: "search-context", Aliases: []string{"search_context", "search-with-context", "search_with_context"}, Tool: "search_with_context", Usage: appName + " search-context <keyword> [--in <chat>] [--before-count 5] [--after-count 5]", Positional: "keyword", Examples: []string{appName + ` search-context "$KEYWORD" --in "$CHAT" --limit 5`, appName + ` search-with-context "$KEYWORD" --context-limit 3 --before-count 10 --after-count 10`}},
@@ -730,11 +730,15 @@ func runTailCLI(flags map[string]any, opts cliOptions, command string) {
 		if err := writeReadEventsJSONL(enc, env); err != nil {
 			exitCLIError(opts, 1, "io_error", err.Error(), "read_events", command)
 		}
+		previousCursor := getStr(flags, "cursor")
 		if cursor := rowString(wcdb.Row(env), "cursor"); cursor != "" {
 			flags["cursor"] = cursor
 		}
 		if !follow {
 			return
+		}
+		if readEventsBatchCanDrain(env, previousCursor) {
+			continue
 		}
 		time.Sleep(readEventsPollInterval(flags))
 	}
@@ -746,7 +750,18 @@ func writeReadEventsJSONL(enc *json.Encoder, env map[string]any) error {
 			return err
 		}
 	}
-	return nil
+	// A checkpoint also represents an empty baseline and carries diagnostics.
+	// Inline session cursors are emitted once per batch, so consumers commit
+	// this cursor only after processing every preceding event in the batch.
+	return enc.Encode(map[string]any{
+		"type": "checkpoint", "cursor": getStr(env, "cursor"),
+		"query": env["query"], "freshness": env["freshness"], "warnings": env["warnings"],
+	})
+}
+
+func readEventsBatchCanDrain(env map[string]any, previousCursor string) bool {
+	cursor := getStr(env, "cursor")
+	return cursor != "" && cursor != previousCursor && getBoolDefault(mapStringAny(env["query"]), "has_more", false)
 }
 
 // cliRowsResult carries row-oriented tool output plus source diagnostics without
@@ -908,8 +923,10 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 	}
 	out := compactMap(map[string]any{
 		"id": compactMap(map[string]any{
-			"local_id": row["local_id"],
-			"talker":   row["talker"],
+			"local_id":      row["local_id"],
+			"talker":        row["talker"],
+			"server_id_str": row["server_id_str"],
+			"message_token": row["message_token"],
 		}),
 		"time":                   formatUnixLocal(createTime),
 		"time_iso":               cliFormatUnixISO(createTime),
@@ -1221,6 +1238,26 @@ func cliErrorAdvice(errCode, message, tool, command string) cliAdvice {
 		}
 	}
 	switch {
+	case strings.Contains(msg, "message_cursor_source_incomplete"):
+		return cliAdvice{
+			NextAction:        "Keep the existing cursor and retry after every message shard is readable; do not advance from partial data.",
+			SuggestedCommands: []string{appName + " doctor --full --pretty"},
+		}
+	case strings.Contains(msg, "message_cursor_stale"):
+		return cliAdvice{
+			NextAction:        "The original anchor changed or disappeared. Read a fresh timeline for this chat and choose a new message_token; automatic continuation would risk a gap.",
+			SuggestedCommands: []string{appName + ` timeline "$CHAT" --limit 20`},
+		}
+	case strings.Contains(msg, "message_cursor_"):
+		return cliAdvice{
+			NextAction:        "Reuse the complete message_token from timeline/search with the same account and chat; remove conflicting local/server ID arguments.",
+			SuggestedCommands: []string{appName + " tool-schema timeline", appName + " tool-schema context"},
+		}
+	case strings.Contains(msg, "session cursor"):
+		return cliAdvice{
+			NextAction:        "Keep the cursor with its original account, filters and state directory. If it is unavailable or invalid, explicitly start a new baseline without cursor; changes during that gap cannot be reconstructed.",
+			SuggestedCommands: []string{appName + " tool-schema tail"},
+		}
 	case strings.Contains(msg, "libwcdb") || strings.Contains(msg, "wcdb"):
 		return cliAdvice{
 			NextAction:        "Use an installed release or set WECHAT_CLI_WCDB_LIB/WECHAT_CLI_WCDB_DYLIB to the bundled WCDB library.",
@@ -1303,6 +1340,10 @@ func parseGlobalCLIOptions(args []string) (cliOptions, []string, error) {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			out = append(out, args[i:]...)
+			break
+		}
 		key, val, hasValue, ok := splitGlobalFlag(a)
 		if !ok {
 			out = append(out, a)
@@ -1392,6 +1433,9 @@ func parseKVFlags(args []string) map[string]any {
 	out := map[string]any{}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			break
+		}
 		if !strings.HasPrefix(a, "--") {
 			continue
 		}
@@ -1415,7 +1459,7 @@ func parseKVFlags(args []string) map[string]any {
 				continue
 			}
 		}
-		if strings.HasSuffix(key, "_str") {
+		if strings.HasSuffix(key, "_str") || isStringCLIFlag(key) {
 			out[key] = val
 			continue
 		}
@@ -1441,8 +1485,29 @@ func isBoolCLIFlag(key string) bool {
 	case "allow_remote", "background", "browser", "debug", "desktop", "follow", "force", "friends_only", "from_me", "groups_only", "include_anchor", "include_debug", "include_images", "include_local_paths", "include_media_paths", "include_read", "include_status", "include_text", "jsonl", "no_open", "open", "snippet_only", "stats":
 		return true
 	default:
-		return false
+		return cliSchemaFlagType(key) == "boolean"
 	}
+}
+
+func isStringCLIFlag(key string) bool {
+	switch key {
+	case "in", "addr", "listen", "profile":
+		return true
+	default:
+		return cliSchemaFlagType(key) == "string"
+	}
+}
+
+// CLI flag values are strings in argv. Only coerce fields whose schema calls
+// for it, so names such as "001" and keywords such as "true" stay intact.
+func cliSchemaFlagType(key string) string {
+	for _, td := range toolDefs {
+		if prop, ok := toolInputProperties(td)[key].(map[string]any); ok {
+			kind, _ := prop["type"].(string)
+			return kind
+		}
+	}
+	return ""
 }
 
 func isBoolLiteral(s string) bool {
@@ -1451,6 +1516,9 @@ func isBoolLiteral(s string) bool {
 
 func hasHelpFlag(args []string) bool {
 	for _, a := range args {
+		if a == "--" {
+			return false
+		}
 		if a == "-h" || a == "--help" {
 			return true
 		}
@@ -1483,12 +1551,20 @@ func helpTargetForCommand(args []string) string {
 func firstPositional(args []string) string {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		if a == "--" {
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
 		if strings.HasPrefix(a, "--") {
 			key := strings.TrimPrefix(a, "--")
 			key, _, _ = strings.Cut(key, "=")
 			key = strings.ReplaceAll(key, "-", "_")
-			if !strings.Contains(a, "=") && !isBoolCLIFlag(key) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
-				i++
+			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+				if !isBoolCLIFlag(key) || isBoolLiteral(args[i+1]) {
+					i++
+				}
 			}
 			continue
 		}
@@ -1565,7 +1641,7 @@ func cliHelpDocumentWithProfile(target string, profile string) any {
 			"success":             "object with ok=true, tool, command, data",
 			"error":               "object with ok=false and error.code/message/next_action/suggested_commands",
 			"default":             "compact single JSON envelope",
-			"streaming_exception": "tail/watch with --jsonl or --follow emits newline-delimited event objects without the envelope",
+			"streaming_exception": "tail/watch with --jsonl or --follow emits newline-delimited events plus batch checkpoints without the envelope",
 		},
 		"global_flags": cliGlobalFlags(),
 		"commands":     cliCommandSpecs,
@@ -1627,7 +1703,9 @@ func agentHelpForTool(spec cliCommandSpec, tool toolDef) map[string]any {
 		strategy = append(strategy, "If a human chat name may be ambiguous, run resolve-chat first and pass the returned username as talker/chatroom_id.")
 	}
 	if tool.Name == "chat_timeline" || tool.Name == "messages" {
-		strategy = append(strategy, "For complete reads, pass data.query.cursor.next_before_message as before_message while data.query.has_more is true; use next_after_message for newer messages. Keep offset at zero when using a cursor.")
+		strategy = append(strategy, "For complete reads, pass data.query.cursor.next_before_message_token as before_message_token while data.query.has_more is true; use next_after_message_token as after_message_token for newer messages. Tokens identify the account, conversation, and original shard even without a server ID. Legacy local/server ID boundaries remain supported. Keep offset at zero when using a cursor.")
+	} else if tool.Name == "read_events" {
+		strategy = append(strategy, "Reuse data.cursor for the same account and filters. In JSONL, process all events before committing the trailing checkpoint cursor; checkpoints also carry warnings and empty baselines. Drain has_more while the cursor advances, otherwise wait for the next poll.")
 	} else if hasAnyProp(props, "limit", "offset") && tool.Name != "message_context" {
 		strategy = append(strategy, "For complete reads, loop while data.query.has_more is true when available; otherwise increment offset by the returned item count until fewer than limit rows return.")
 	}

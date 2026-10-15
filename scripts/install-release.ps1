@@ -10,11 +10,13 @@ param(
   [switch]$WithASR,
   [switch]$BackgroundRefresh,
   [switch]$KeepDownload,
-  [switch]$AllowUnsigned
+  [switch]$AllowUnsigned,
+  [switch]$AllowPrerelease
 )
 
 $ErrorActionPreference = "Stop"
 
+if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = $env:WECHAT_CLI_RELEASE_REPO }
 if ([string]::IsNullOrWhiteSpace($Repo)) { $Repo = "https://github.com/r266-tech/wechat-cli-releases" }
 if ([string]::IsNullOrWhiteSpace($Tag)) { $Tag = "latest" }
 if ([string]::IsNullOrWhiteSpace($Asset)) { $Asset = "wechat-cli-latest-windows-amd64.zip" }
@@ -100,6 +102,69 @@ function Confirm-ReleaseChecksum([string]$Url, [string]$ZipPath, [string]$ShaPat
   return $true
 }
 
+function Expand-VerifiedRelease([string]$ZipPath, [string]$Destination, [string]$ExpectedVersion, [bool]$Preview) {
+  Add-Type -AssemblyName System.IO.Compression.FileSystem
+  if (Test-Path -LiteralPath $Destination) { throw "extraction destination must be new" }
+  $archive = [IO.Compression.ZipFile]::OpenRead($ZipPath)
+  try {
+    if ($archive.Entries.Count -gt 2000) { throw "release archive budget exceeded" }
+    $entries = @{}
+    $roots = @{}
+    [long]$total = 0
+    foreach ($entry in $archive.Entries) {
+      $name = $entry.FullName
+      $parts = $name.TrimEnd('/').Split('/')
+      if ([string]::IsNullOrWhiteSpace($name) -or $name.Contains('\') -or $name.StartsWith('/') -or
+          $name -match '[:\x00-\x1f]' -or ($parts | Where-Object { $_ -in @('', '.', '..') -or $_ -match '[. ]$' -or $_ -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(?:\.|$)' }).Count -gt 0) {
+        throw "unsafe release path"
+      }
+      if ((($entry.ExternalAttributes -shr 16) -band 0xF000) -eq 0xA000) { throw "release symlink is forbidden" }
+      $key = $name.TrimEnd('/')
+      if ($entries.ContainsKey($key)) { throw "duplicate release path" }
+      $entries[$key] = $entry
+      $roots[$parts[0]] = $true
+      $total += $entry.Length
+    }
+    if ($total -gt 268435456) { throw "release archive budget exceeded" }
+    if ($roots.Count -ne 1) { throw "expected one release root" }
+    $prefix = @($roots.Keys)[0] + '/'
+    $manifestEntry = $entries[$prefix + 'release-manifest.json']
+    if ($null -eq $manifestEntry -or $manifestEntry.Length -gt 2097152) { throw "release manifest missing or too large" }
+    $reader = New-Object IO.StreamReader($manifestEntry.Open())
+    try { $manifest = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+    if ($manifest.schema_version -ne 2 -or $manifest.source_repository -cne 'r266-tech/wx-cli' -or
+        $manifest.version -cne $ExpectedVersion -or $manifest.platform_arch -cne 'windows-amd64' -or
+        $manifest.commit -cnotmatch '^[0-9a-f]{40}$') { throw "release manifest identity mismatch" }
+    # Windows packages currently have no accepted signing/acceptance pipeline.
+    # Keep them explicit previews instead of treating an unsigned ZIP as stable.
+    if (-not $Preview -or $ExpectedVersion -notmatch '^\d+\.\d+\.\d+-[0-9A-Za-z.-]+$' -or
+        $manifest.channel -cne 'candidate' -or $manifest.signing_mode -cne 'unsigned' -or
+        $manifest.notarization_status -cne 'not_applicable') { throw "Windows candidate requires an explicit prerelease tag and -AllowPrerelease" }
+    $artifacts = @{}
+    foreach ($property in $manifest.artifacts.PSObject.Properties) {
+      if ($artifacts.ContainsKey($property.Name)) { throw "duplicate manifest artifact" }
+      $artifacts[$property.Name] = $property.Value
+    }
+    foreach ($required in @('wechat-cli.exe', 'libWCDB.dll', 'install.ps1')) {
+      if (-not $artifacts.ContainsKey($required)) { throw "required release artifact missing" }
+    }
+    $files = @($archive.Entries | Where-Object { -not $_.FullName.EndsWith('/') -and $_.FullName -cne ($prefix + 'release-manifest.json') })
+    if ($files.Count -ne $artifacts.Count) { throw "manifest file set mismatch" }
+    foreach ($entry in $files) {
+      $name = $entry.FullName.Substring($prefix.Length)
+      $expected = $artifacts[$name]
+      if ($null -eq $expected -or $expected.bytes -ne $entry.Length -or $expected.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "manifest artifact mismatch" }
+      $stream = $entry.Open()
+      $hasher = [Security.Cryptography.SHA256]::Create()
+      try { $hash = [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-', '').ToLowerInvariant() }
+      finally { $hasher.Dispose(); $stream.Dispose() }
+      if ($hash -cne $expected.sha256) { throw "manifest artifact hash mismatch" }
+    }
+  } finally { $archive.Dispose() }
+  [IO.Compression.ZipFile]::ExtractToDirectory($ZipPath, $Destination)
+  return Join-Path $Destination $prefix.TrimEnd('/')
+}
+
 function Invoke-ReleaseInstall {
   if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
     throw "this installer is for Windows; use scripts/install-release.sh on macOS"
@@ -114,11 +179,20 @@ function Invoke-ReleaseInstall {
   }
 
   $slug = Get-RepoSlug $Repo
+  if ($slug -notmatch '^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*$') { throw "invalid GitHub repository" }
   $base = Get-RepoUrl $Repo
+  if ($AllowPrerelease -and ($Tag -eq 'latest' -or $Tag -notmatch '^v\d+\.\d+\.\d+-[0-9A-Za-z.-]+$')) { throw "-AllowPrerelease requires an explicit prerelease tag" }
+  if ($Tag -eq 'latest') {
+    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$slug/releases/latest" -UseBasicParsing
+    $Tag = $release.tag_name
+  }
+  if ($Tag -notmatch '^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') { throw "invalid release tag" }
+  if ($Asset -eq 'wechat-cli-latest-windows-amd64.zip') { $Asset = "wechat-cli-$Tag-windows-amd64.zip" }
+  if ($Asset -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$') { throw "invalid release asset filename" }
   $url = Get-AssetUrl $base $Tag $Asset
   $tmp = Join-Path ([IO.Path]::GetTempPath()) ("wechat-cli-install-" + [Guid]::NewGuid().ToString("N"))
   $extract = Join-Path $tmp "extract"
-  New-Item -ItemType Directory -Force -Path $extract | Out-Null
+  New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 
   try {
     $zip = Join-Path $tmp $Asset
@@ -143,9 +217,9 @@ function Invoke-ReleaseInstall {
       Write-Step "Verified release checksum."
     }
 
-    Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
-    $installer = Get-ChildItem -LiteralPath $extract -Filter install.ps1 -Recurse | Select-Object -First 1
-    if ($null -eq $installer) {
+    $packageRoot = Expand-VerifiedRelease $zip $extract ($Tag.Substring(1)) ([bool]$AllowPrerelease)
+    $installer = Join-Path $packageRoot 'install.ps1'
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
       throw "install.ps1 not found inside release zip"
     }
 
@@ -167,8 +241,8 @@ function Invoke-ReleaseInstall {
     }
     if ($BackgroundRefresh) { $installerArgs += "-BackgroundRefresh" }
 
-    Write-Step "Running bundled installer from $($installer.DirectoryName)"
-    & powershell -NoProfile -ExecutionPolicy Bypass -File $installer.FullName @installerArgs
+    Write-Step "Running bundled installer from $packageRoot"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $installer @installerArgs
     if ($LASTEXITCODE -ne 0) {
       exit $LASTEXITCODE
     }

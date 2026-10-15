@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -104,8 +105,8 @@ func parseUpdateArgs(args []string) (updateOptions, error) {
 	if opts.AllowPrerelease && (!strings.Contains(opts.Tag, "-") || opts.Tag == "latest") {
 		return opts, fmt.Errorf("--allow-prerelease requires an explicit prerelease --tag")
 	}
-	if opts.AllowPrerelease && runtime.GOOS == "windows" {
-		return opts, fmt.Errorf("prerelease bootstrap currently supports macOS only")
+	if opts.Asset != "" && !regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*\.zip$`).MatchString(opts.Asset) {
+		return opts, fmt.Errorf("--asset must be a ZIP filename without path separators")
 	}
 	return opts, nil
 }
@@ -181,6 +182,9 @@ func runDarwinReleaseUpdate(opts updateOptions) (map[string]any, error) {
 	attachUpdaterOutput(data, stdout.Bytes(), stderr.Bytes())
 	if err != nil {
 		return nil, fmt.Errorf("release updater failed: %w%s", err, updateFailureHint(stdout.String(), stderr.String()))
+	}
+	if err := validateInstallerSuccess(stdout.Bytes(), opts.DryRun); err != nil {
+		return nil, fmt.Errorf("release updater did not confirm installation: %w", err)
 	}
 	data["status"] = "completed"
 	if opts.DryRun {
@@ -261,6 +265,9 @@ func startWindowsReleaseUpdate(opts updateOptions) (map[string]any, error) {
 	}
 	if opts.KeepDownload {
 		args = append(args, "-KeepDownload")
+	}
+	if opts.AllowPrerelease {
+		args = append(args, "-AllowPrerelease")
 	}
 	if opts.Repo != "" {
 		args = append(args, "-Repo", opts.Repo)
@@ -366,7 +373,25 @@ func parseJSONOutput(raw []byte) (any, bool) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, false
 	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
 	return v, true
+}
+
+func validateInstallerSuccess(raw []byte, dryRun bool) error {
+	value, parsed := parseJSONOutput(raw)
+	result, object := value.(map[string]any)
+	if !parsed || !object || result["ok"] != true {
+		return fmt.Errorf("expected one successful installer JSON result")
+	}
+	status, _ := result["status"].(string)
+	validStatus := status == "ok" || status == "ready" || status == "warming_cache"
+	if (dryRun && status != "dry_run") || (!dryRun && !validStatus) {
+		return fmt.Errorf("installer status does not match requested update mode")
+	}
+	return nil
 }
 
 func truncateUpdateOutput(s string) string {
@@ -418,7 +443,8 @@ param(
   [string]$Asset = "",
   [string]$InstallDir = "",
   [switch]$DryRun,
-  [switch]$KeepDownload
+  [switch]$KeepDownload,
+  [switch]$AllowPrerelease
 )
 
 $ErrorActionPreference = "Stop"
@@ -444,6 +470,7 @@ try {
   $installArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $bootstrap, "-Update", "-Json")
   if ($DryRun) { $installArgs += "-DryRun" }
   if ($KeepDownload) { $installArgs += "-KeepDownload" }
+  if ($AllowPrerelease) { $installArgs += "-AllowPrerelease" }
   if (-not [string]::IsNullOrWhiteSpace($Repo)) { $installArgs += @("-Repo", $Repo) }
   if (-not [string]::IsNullOrWhiteSpace($Tag)) { $installArgs += @("-Tag", $Tag) }
   if (-not [string]::IsNullOrWhiteSpace($Asset)) { $installArgs += @("-Asset", $Asset) }

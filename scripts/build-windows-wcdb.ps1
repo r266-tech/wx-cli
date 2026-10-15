@@ -53,7 +53,12 @@ if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
 }
 
 $versionNoPrefix = $WcdbVersion -replace '^v', ''
-$sourceUrl = "https://github.com/Tencent/wcdb/releases/download/v$versionNoPrefix/wcdb-$versionNoPrefix.zip"
+$sourceRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$lock = Get-Content -LiteralPath (Join-Path $sourceRoot "release-dependencies.json") -Raw | ConvertFrom-Json
+if ($lock.schema_version -ne 1 -or $versionNoPrefix -ne $lock.wcdb.version -or $lock.wcdb.archive_sha256 -notmatch '^[0-9a-f]{64}$') {
+  throw "WCDB version must match the pinned release-dependencies.json source"
+}
+$sourceUrl = $lock.wcdb.source_url
 $archive = Join-Path $WorkDir "wcdb-$versionNoPrefix.zip"
 $extractRoot = Join-Path $WorkDir "src"
 $buildDir = Join-Path $WorkDir "build"
@@ -65,6 +70,9 @@ New-Item -ItemType Directory -Force -Path $WorkDir, $extractRoot, $OutDir | Out-
 
 try {
   Invoke-WebRequest -Uri $sourceUrl -OutFile $archive
+  if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ine $lock.wcdb.archive_sha256) {
+    throw "WCDB source checksum mismatch"
+  }
   Expand-Archive -LiteralPath $archive -DestinationPath $extractRoot -Force
 
   $sourceDir = Join-Path $extractRoot "wcdb-$versionNoPrefix\src"
@@ -82,6 +90,17 @@ try {
   $dll = Find-WcdbDll -BuildDir $buildDir
   $dest = Join-Path $OutDir "libWCDB.dll"
   Copy-Item -LiteralPath $dll -Destination $dest -Force
+  $evidence = [ordered]@{
+    repository = $lock.wcdb.repository
+    version = $versionNoPrefix
+    source_url = $sourceUrl
+    archive_sha256 = $lock.wcdb.archive_sha256
+    commit_sha = $lock.wcdb.commit_sha
+    build_platform = "windows-amd64"
+    build_flags = @("-G", "Visual Studio 17 2022", "-A", "x64", "-DBUILD_SHARED_LIBS=ON", "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded", "-DCMAKE_C_FLAGS=$sqliteExportFlag")
+    binary_sha256 = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash.ToLowerInvariant()
+  }
+  $evidence | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath "$dest.build-inputs.json" -Encoding UTF8
 
   [ordered]@{
     wcdb_version = $versionNoPrefix

@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -24,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/r266-tech/wx-cli/v2/internal/diagnostics"
 )
 
 const (
@@ -35,6 +39,7 @@ const (
 	companionMessageTextMaxChars  = 700
 	companionUploadRequestMaxSize = 128 << 20
 	companionUploadFileMaxSize    = 64 << 20
+	companionJSONRequestMaxSize   = 2 << 20
 	companionAttachmentTextMax    = 6000
 	companionCPUDefaultTimeout    = 180 * time.Second
 	companionCPUShutdownGrace     = 15 * time.Second
@@ -42,6 +47,7 @@ const (
 	companionCPUHistoryTextMax    = 3000
 	companionCPULogTextMax        = 420
 	companionCPUToolOutputMax     = 900
+	companionCPUStreamLineMax     = 1 << 20
 )
 
 type companionAskRequest struct {
@@ -623,6 +629,9 @@ func companionAskHandler(w http.ResponseWriter, r *http.Request) {
 		writeCompanionError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
 		return
 	}
+	if companionRejectStrictWrite(w) {
+		return
+	}
 	var req companionAskRequest
 	if err := readCompanionJSON(r, &req); err != nil {
 		writeCompanionError(w, http.StatusBadRequest, "invalid_json", err.Error())
@@ -639,6 +648,9 @@ func companionAskHandler(w http.ResponseWriter, r *http.Request) {
 func companionAskStreamHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeCompanionError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
+		return
+	}
+	if companionRejectStrictWrite(w) {
 		return
 	}
 	var req companionAskRequest
@@ -665,7 +677,7 @@ func companionAskStreamHandler(w http.ResponseWriter, r *http.Request) {
 	flusher.Flush()
 	data, status, code, message := companionBuildAskData(r.Context(), req, writeEvent)
 	if status != http.StatusOK {
-		writeEvent("error", map[string]any{"code": code, "message": message})
+		writeEvent("error", map[string]any{"code": code, "message": diagnostics.Redact(message)})
 		return
 	}
 	writeEvent("answer", data)
@@ -677,33 +689,76 @@ func companionUploadHandler(w http.ResponseWriter, r *http.Request) {
 		writeCompanionError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST required")
 		return
 	}
+	if companionRejectStrictWrite(w) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, companionUploadRequestMaxSize)
 	if err := r.ParseMultipartForm(companionUploadRequestMaxSize); err != nil {
 		writeCompanionError(w, http.StatusBadRequest, "invalid_upload", err.Error())
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 {
 		writeCompanionError(w, http.StatusBadRequest, "missing_file", "no files uploaded")
 		return
 	}
-	attachments := make([]companionAttachment, 0, len(files))
+	for _, header := range files {
+		if header != nil && header.Size > companionUploadFileMaxSize {
+			writeCompanionError(w, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("%s exceeds 64MB", header.Filename))
+			return
+		}
+	}
+	attachments, err := companionSaveUploadBatch(files)
+	if err != nil {
+		writeCompanionError(w, http.StatusInternalServerError, "upload_failed", err.Error())
+		return
+	}
+
+	writeCompanionJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{"attachments": attachments}})
+}
+
+// A failed multipart request must not leave private copies that the caller
+// never received. Remove only this request's successfully staged uploads.
+func companionSaveUploadBatch(files []*multipart.FileHeader) (attachments []companionAttachment, err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		for _, attachment := range attachments {
+			dir, openErr := companionOpenVerifiedRoot(filepath.Dir(attachment.Path))
+			if openErr != nil {
+				err = errors.Join(err, openErr)
+				continue
+			}
+			removeErr := dir.Remove(filepath.Base(attachment.Path))
+			_ = dir.Close()
+			if removeErr != nil {
+				err = errors.Join(err, removeErr)
+			}
+		}
+		attachments = nil
+	}()
 	for _, header := range files {
 		if header == nil {
 			continue
 		}
-		if header.Size > companionUploadFileMaxSize {
-			writeCompanionError(w, http.StatusRequestEntityTooLarge, "file_too_large", fmt.Sprintf("%s exceeds 64MB", header.Filename))
-			return
-		}
-		attachment, err := companionSaveUploadedFile(header)
+		var attachment companionAttachment
+		attachment, err = companionSaveUploadedFile(header)
 		if err != nil {
-			writeCompanionError(w, http.StatusInternalServerError, "upload_failed", err.Error())
 			return
 		}
 		attachments = append(attachments, attachment)
 	}
-	writeCompanionJSON(w, http.StatusOK, map[string]any{"ok": true, "data": map[string]any{"attachments": attachments}})
+	return
+}
+
+func companionRejectStrictWrite(w http.ResponseWriter) bool {
+	if !strictReadOnlyMode() {
+		return false
+	}
+	writeCompanionError(w, http.StatusForbidden, "strict_read_only", "companion uploads and CPU requests write local files and are disabled in strict read-only mode")
+	return true
 }
 
 func companionAttachmentHandler(w http.ResponseWriter, r *http.Request) {
@@ -857,20 +912,12 @@ func companionRunCPU(ctx context.Context, prompt companionPrompt, handoff map[st
 	runCtx, cancel := context.WithTimeout(ctx, timeout+companionCPUShutdownGrace)
 	defer cancel()
 	cmd := exec.CommandContext(runCtx, binary, args...)
+	configureCompanionCPUProcess(cmd)
 	cmd.Env = companionCPUChildEnv()
 	cmd.Dir = companionCPUWorkDir()
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return companionCPUResult{}, err
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return companionCPUResult{}, err
-	}
-
-	if err := cmd.Start(); err != nil {
-		return companionCPUResult{}, err
-	}
+	// Let exec own its pipe-copy goroutines so Wait drains the output before
+	// closing its pipes. Bound inherited pipe handles after a wrapper exits.
+	cmd.WaitDelay = 2 * time.Second
 
 	state := newCompanionCPUStreamState()
 	done := make(chan struct{})
@@ -884,21 +931,19 @@ func companionRunCPU(ctx context.Context, prompt companionPrompt, handoff map[st
 		}
 		outputMu.Lock()
 		defer outputMu.Unlock()
-		outputLines = append(outputLines, companionTraceText(line, companionCPULogTextMax))
+		outputLines = append(outputLines, companionTraceText(diagnostics.Redact(line), companionCPULogTextMax))
 		if len(outputLines) > 24 {
 			outputLines = outputLines[len(outputLines)-24:]
 		}
 	}
 
-	wg.Add(3)
-	go func() {
-		defer wg.Done()
-		companionScanCPUOutput(stdout, emit, collect)
-	}()
-	go func() {
-		defer wg.Done()
-		companionScanCPUOutput(stderr, emit, collect)
-	}()
+	stdout := &companionCPUOutputWriter{emit: emit, collect: collect}
+	stderr := &companionCPUOutputWriter{emit: emit, collect: collect}
+	cmd.Stdout, cmd.Stderr = stdout, stderr
+	if err := cmd.Start(); err != nil {
+		return companionCPUResult{}, err
+	}
+	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -918,6 +963,15 @@ func companionRunCPU(ctx context.Context, prompt companionPrompt, handoff map[st
 	}()
 
 	err = cmd.Wait()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.Cancel != nil {
+		// The wrapper exited but descendants still own its pipes. They remain in
+		// this request's process group on Unix; stop them before returning.
+		if cancelErr := cmd.Cancel(); cancelErr != nil && !errors.Is(cancelErr, os.ErrProcessDone) {
+			err = errors.Join(err, cancelErr)
+		}
+	}
+	stdout.flush()
+	stderr.flush()
 	close(done)
 	wg.Wait()
 	if runCtx.Err() == context.DeadlineExceeded {
@@ -965,7 +1019,7 @@ func companionExecutableFile(path string) bool {
 		return false
 	}
 	info, err := os.Stat(path)
-	return err == nil && !info.IsDir() && info.Mode()&0o111 != 0
+	return err == nil && info.Mode().IsRegular() && (runtime.GOOS == "windows" || info.Mode()&0o111 != 0)
 }
 
 func companionCPUTimeout() time.Duration {
@@ -1077,20 +1131,85 @@ func newCompanionCPUStreamState() *companionCPUStreamState {
 	}
 }
 
+// Output is diagnostic data. An oversized line must be drained, rather than
+// stopping the pipe reader and blocking the child process.
+type companionCPUOutputWriter struct {
+	pending   []byte
+	oversized bool
+	emit      companionStreamEmitter
+	collect   func(string)
+}
+
+func (w *companionCPUOutputWriter) Write(p []byte) (int, error) {
+	total := len(p)
+	for len(p) > 0 {
+		i := bytes.IndexByte(p, '\n')
+		n := len(p)
+		if i >= 0 {
+			n = i + 1
+		}
+		if !w.oversized {
+			if len(w.pending)+n > companionCPUStreamLineMax {
+				w.pending = nil
+				w.oversized = true
+			} else {
+				w.pending = append(w.pending, p[:n]...)
+			}
+		}
+		p = p[n:]
+		if i >= 0 {
+			w.flush()
+		}
+	}
+	return total, nil
+}
+
+func (w *companionCPUOutputWriter) flush() {
+	line := strings.TrimSpace(string(w.pending))
+	if w.oversized {
+		line = "babata-cpu: oversized output line omitted"
+	}
+	w.pending = w.pending[:0]
+	w.oversized = false
+	if line == "" {
+		return
+	}
+	if w.collect != nil {
+		w.collect(line)
+	}
+	if w.emit != nil && companionShouldShowCPULog(line) {
+		w.emit("cpu_log", map[string]any{"text": companionHumanCPULog(line)})
+	}
+}
+
 func companionScanCPUOutput(r io.Reader, emit companionStreamEmitter, collect func(string)) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+	writer := &companionCPUOutputWriter{emit: emit, collect: collect}
+	_, err := io.Copy(writer, r)
+	writer.flush()
+	if err != nil {
+		_, _ = fmt.Fprintf(writer, "babata-cpu: output read failed: %s\n", diagnostics.Redact(err.Error()))
+	}
+}
+
+// Return a bounded line together with its full byte length, preserving offsets
+// while allowing a caller to retry an incomplete JSONL tail on the next poll.
+func companionReadBoundedLine(reader *bufio.Reader) (line string, n int64, oversized bool, err error) {
+	var data []byte
+	for {
+		part, readErr := reader.ReadSlice('\n')
+		n += int64(len(part))
+		if !oversized {
+			if n > companionCPUStreamLineMax {
+				oversized = true
+				data = nil
+			} else {
+				data = append(data, part...)
+			}
+		}
+		if readErr == bufio.ErrBufferFull {
 			continue
 		}
-		if collect != nil {
-			collect(line)
-		}
-		if emit != nil && companionShouldShowCPULog(line) {
-			emit("cpu_log", map[string]any{"text": companionTraceText(companionHumanCPULog(line), companionCPULogTextMax)})
-		}
+		return string(data), n, oversized, readErr
 	}
 }
 
@@ -1109,7 +1228,7 @@ func companionShouldShowCPULog(line string) bool {
 }
 
 func companionHumanCPULog(line string) string {
-	line = companionTraceText(line, companionCPULogTextMax)
+	line = companionTraceText(diagnostics.Redact(line), companionCPULogTextMax)
 	line = strings.ReplaceAll(line, "stream-json -> ", "stream -> ")
 	return line
 }
@@ -1144,13 +1263,17 @@ func companionReadCPUStreamFile(path string, state *companionCPUStreamState, emi
 	reader := bufio.NewReader(f)
 	pos := offset
 	for {
-		line, err := reader.ReadString('\n')
-		if len(line) > 0 {
-			if err == io.EOF && !final && !strings.HasSuffix(line, "\n") {
+		line, n, oversized, err := companionReadBoundedLine(reader)
+		if n > 0 {
+			if err == io.EOF && !final {
 				break
 			}
-			pos += int64(len(line))
-			companionHandleCPUStreamLine(line, state, emit)
+			pos += n
+			if oversized {
+				emit("cpu_log", map[string]any{"text": "babata-cpu: oversized stream event omitted"})
+			} else {
+				companionHandleCPUStreamLine(line, state, emit)
+			}
 		}
 		if err != nil {
 			break
@@ -1165,7 +1288,7 @@ func companionHandleCPUStreamLine(line string, state *companionCPUStreamState, e
 		return
 	}
 	var event map[string]any
-	if err := json.Unmarshal([]byte(line), &event); err != nil {
+	if err := companionDecodeJSONNumbers(line, &event); err != nil {
 		return
 	}
 	typ := stringMapValue(event, "type")
@@ -1345,7 +1468,7 @@ func companionCPUCommandInfoFromCommand(name, command string, fallbackArgs map[s
 		return info
 	}
 	tool := firstNonEmpty(strings.TrimSpace(name), "tool")
-	displayCommand := companionTraceText(firstNonEmpty(command, tool), 180)
+	displayCommand := companionTraceText(diagnostics.Redact(firstNonEmpty(command, tool)), 180)
 	return companionCPUCommandInfo{
 		Tool:           tool,
 		Label:          companionCPUStreamToolLabel(name, map[string]any{"command": command}),
@@ -1733,7 +1856,7 @@ func companionBuildCPUCommandTrace(id string, info companionCPUCommandInfo, stat
 		}
 		if status == "error" && trace.Status != "error" {
 			trace.Status = "error"
-			trace.Summary = companionTraceText(firstNonEmpty(output, "工具调用失败"), companionCPUToolOutputMax)
+			trace.Summary = companionTraceText(diagnostics.Redact(firstNonEmpty(output, "工具调用失败")), companionCPUToolOutputMax)
 		}
 		return companionToolTraceEventMap(trace)
 	}
@@ -1765,7 +1888,7 @@ func companionBuildCPUCommandTrace(id string, info companionCPUCommandInfo, stat
 		Label:      info.Label,
 		Summary:    companionCPUFallbackSummary(info, status, output),
 		Args:       info.Args,
-		Result:     compactMap(map[string]any{"text": companionTraceText(output, companionCPUToolOutputMax)}),
+		Result:     compactMap(map[string]any{"text": companionTraceText(diagnostics.Redact(output), companionCPUToolOutputMax)}),
 		DurationMS: durationMS,
 	}
 	return companionToolTraceEventMap(trace)
@@ -1785,9 +1908,9 @@ func companionNormalizeCPUStatus(status string) string {
 func companionCPUFallbackSummary(info companionCPUCommandInfo, status, output string) string {
 	if output != "" {
 		if info.Tool == "version" {
-			return "检查版本：" + companionTraceText(companionFirstOutputLine(output), 160)
+			return "检查版本：" + companionTraceText(diagnostics.Redact(companionFirstOutputLine(output)), 160)
 		}
-		return companionTraceText(output, companionCPUToolOutputMax)
+		return companionTraceText(diagnostics.Redact(output), companionCPUToolOutputMax)
 	}
 	if status == "error" {
 		return "工具调用失败"
@@ -1814,7 +1937,7 @@ func companionParseToolEnvelope(output string) (string, any, string, error, bool
 		return "", nil, "", nil, false
 	}
 	var env map[string]any
-	if err := json.Unmarshal([]byte(output), &env); err != nil {
+	if err := companionDecodeJSONNumbers(output, &env); err != nil {
 		return "", nil, "", nil, false
 	}
 	_, hasOK := env["ok"]
@@ -1826,7 +1949,8 @@ func companionParseToolEnvelope(output string) (string, any, string, error, bool
 	if !hasOK && !hasTool && !hasName && !hasCommand && !hasData && !hasResult {
 		return "", nil, "", nil, false
 	}
-	tool := companionNormalizeWechatTool(firstNonEmpty(stringMapValue(env, "tool"), stringMapValue(env, "name"), stringMapValue(env, "command")))
+	nestedError := mapAny(env["error"])
+	tool := companionNormalizeWechatTool(firstNonEmpty(stringMapValue(env, "tool"), stringMapValue(env, "name"), stringMapValue(env, "command"), stringMapValue(nestedError, "tool"), stringMapValue(nestedError, "command")))
 	if tool == "" {
 		tool = firstNonEmpty(stringMapValue(env, "tool"), stringMapValue(env, "name"))
 	}
@@ -1837,13 +1961,26 @@ func companionParseToolEnvelope(output string) (string, any, string, error, bool
 	if data == nil {
 		data = env
 	}
-	errCode := firstNonEmpty(stringMapValue(env, "code"), stringMapValue(env, "error_code"))
+	errCode := firstNonEmpty(stringMapValue(nestedError, "code"), stringMapValue(env, "code"), stringMapValue(env, "error_code"))
 	var err error
 	if ok, exists := env["ok"].(bool); exists && !ok {
-		errText := firstNonEmpty(stringMapValue(env, "message"), stringMapValue(env, "error"), errCode, "wechat-cli returned ok=false")
+		errText := firstNonEmpty(stringMapValue(nestedError, "message"), stringMapValue(env, "message"), stringMapValue(env, "error"), errCode, "wechat-cli returned ok=false")
 		err = fmt.Errorf("%s", errText)
 	}
 	return tool, data, errCode, err, true
+}
+
+func companionDecodeJSONNumbers(input string, out any) error {
+	decoder := json.NewDecoder(strings.NewReader(input))
+	decoder.UseNumber()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return fmt.Errorf("expected one JSON value")
+	}
+	return nil
 }
 
 func companionParseJSONLineMessages(output string) []map[string]any {
@@ -1852,7 +1989,7 @@ func companionParseJSONLineMessages(output string) []map[string]any {
 		return nil
 	}
 	var arrayRows []map[string]any
-	if strings.HasPrefix(output, "[") && json.Unmarshal([]byte(output), &arrayRows) == nil {
+	if strings.HasPrefix(output, "[") && companionDecodeJSONNumbers(output, &arrayRows) == nil {
 		return companionFilterMessageLikeRows(arrayRows)
 	}
 	messages := []map[string]any{}
@@ -1862,7 +1999,7 @@ func companionParseJSONLineMessages(output string) []map[string]any {
 			continue
 		}
 		var row map[string]any
-		if err := json.Unmarshal([]byte(line), &row); err != nil {
+		if err := companionDecodeJSONNumbers(line, &row); err != nil {
 			continue
 		}
 		if msg := mapAny(row["message"]); msg != nil {
@@ -1950,10 +2087,36 @@ func companionCPUStreamToolLabel(name string, input map[string]any) string {
 func companionToolCommandFromInput(name string, input map[string]any) string {
 	for _, key := range []string{"command", "cmd", "tool", "name"} {
 		if v := strings.TrimSpace(stringMapValue(input, key)); v != "" {
-			return companionTraceText(v, 180)
+			return v
 		}
 	}
 	return name
+}
+
+// These are tool diagnostics, not chat messages or assistant answers.
+func companionRedactDiagnosticValue(key string, value any) any {
+	probe := key + "=companion-secret-probe"
+	if diagnostics.Redact(probe) != probe {
+		return "[redacted]"
+	}
+	switch v := value.(type) {
+	case string:
+		return diagnostics.Redact(v)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, item := range v {
+			out[k] = companionRedactDiagnosticValue(k, item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = companionRedactDiagnosticValue("", item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 func companionTraceGenericArgs(input map[string]any) map[string]any {
@@ -1965,10 +2128,10 @@ func companionTraceGenericArgs(input map[string]any) map[string]any {
 		if key == "" {
 			continue
 		}
-		switch v := value.(type) {
+		switch v := companionRedactDiagnosticValue(key, value).(type) {
 		case string:
 			out[key] = companionTraceText(v, 300)
-		case float64, bool, int, int64:
+		case float64, bool, int, int64, json.Number:
 			out[key] = v
 		case nil:
 			continue
@@ -2181,8 +2344,8 @@ func companionBuildToolTrace(id, name, command string, flags map[string]any, dat
 	}
 	if err != nil {
 		trace.Status = "error"
-		trace.Summary = firstNonEmpty(errCode, "tool_error") + ": " + companionTraceText(err.Error(), 180)
-		trace.Error = companionTraceText(err.Error(), 400)
+		trace.Summary = firstNonEmpty(errCode, "tool_error") + ": " + companionTraceText(diagnostics.Redact(err.Error()), 180)
+		trace.Error = companionTraceText(diagnostics.Redact(err.Error()), 400)
 		return trace
 	}
 	switch name {
@@ -2660,6 +2823,9 @@ func intMapValue(m map[string]any, key string) int {
 		return int(v)
 	case float64:
 		return int(v)
+	case json.Number:
+		n, _ := v.Int64()
+		return int(n)
 	default:
 		return 0
 	}
@@ -2832,7 +2998,7 @@ func companionTrustedAttachments(items []companionAttachment) []companionAttachm
 			MIME: mimeType,
 			Size: info.Size(),
 			Path: path,
-			URL:  item.URL,
+			URL:  "/api/attachment/" + url.PathEscape(filepath.Base(filepath.Dir(path))) + "/" + url.PathEscape(filepath.Base(path)),
 		}
 		if companionAttachmentLooksText(name, mimeType) {
 			if _, err := file.Seek(0, io.SeekStart); err == nil {
@@ -3026,9 +3192,26 @@ func queryInt(r *http.Request, key string, def int) int {
 
 func readCompanionJSON(r *http.Request, dst any) error {
 	defer r.Body.Close()
-	dec := json.NewDecoder(io.LimitReader(r.Body, 2*1024*1024))
+	body, err := io.ReadAll(io.LimitReader(r.Body, companionJSONRequestMaxSize+1))
+	if err != nil {
+		return err
+	}
+	if len(body) > companionJSONRequestMaxSize {
+		return fmt.Errorf("JSON request exceeds 2MB")
+	}
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || body[0] != '{' {
+		return fmt.Errorf("request body must be a JSON object")
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
 	dec.DisallowUnknownFields()
-	return dec.Decode(dst)
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(new(any)); err != io.EOF {
+		return fmt.Errorf("request body must contain exactly one JSON object")
+	}
+	return nil
 }
 
 func writeCompanionJSON(w http.ResponseWriter, status int, data any) {
@@ -3043,7 +3226,7 @@ func writeCompanionError(w http.ResponseWriter, status int, code, message string
 		"ok": false,
 		"error": map[string]any{
 			"code":    code,
-			"message": message,
+			"message": diagnostics.Redact(message),
 		},
 	})
 }

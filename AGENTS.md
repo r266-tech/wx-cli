@@ -19,15 +19,15 @@ WeChat 4.x.
 
 Prefer release bootstrap or latest release zip over a source clone.
 
-The current macOS preview is `v2.0.1-rc.5` in `r266-tech/wx-cli`:
+The current macOS preview is `v2.0.1-rc.6` in `r266-tech/wx-cli`:
 
 ```bash
-curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.5/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease
+curl -fsSL https://github.com/r266-tech/wx-cli/releases/download/v2.0.1-rc.6/install-release.sh | zsh -s -- --repo r266-tech/wx-cli --tag v2.0.1-rc.6 --allow-prerelease
 ```
 
 This explicit preview uses ad-hoc signing and is not Apple-notarized. Hash and
 manifest verification still apply. Keep previews separate from stable updates.
-For an existing preview use `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.5 --allow-prerelease`.
+For an existing preview use `wechat-cli update --repo r266-tech/wx-cli --tag v2.0.1-rc.6 --allow-prerelease`.
 
 Human-friendly macOS:
 
@@ -246,34 +246,34 @@ does not install a launchd watcher by default for the same reason.
 - Use `timeline` as the normal chat-reading entrypoint. It resolves `chat`,
   reads live messages, defaults to `order=desc` plus `display_order=asc`, and
   returns `query` / `freshness` / `messages`. Use `query.has_more` and
-  `query.cursor.next_before_message` to page backward without offset drift.
+  `query.cursor.next_before_message_token` as `before_message_token` to page backward without offset drift, including messages without server IDs. Use `next_after_message_token` / `after_message_token` to resume forward. Preserve these opaque tokens unchanged; local IDs can repeat across shards.
 - Use `tail` / `watch` for read-only incremental observation. With `chat` it
   returns message events whose `event.message` has the same shape as timeline
-  rows; without `chat`, `--mode sessions` returns session/unread events. Reuse
+  rows; without `chat`, `--mode sessions` compares complete session snapshots and observes unread-only changes, same-second state differences, additions and removals. These are net changes between polls, not a complete event log; transient changes that revert between polls cannot be observed. The first call marks `query.initial_snapshot=true`, establishes a baseline for all scanned sessions and returns a recent window. Incomplete scans do not advance the cursor or infer removals. On `session_scan_truncated`, retry the same cursor with a larger `scan_limit` (default 5000, maximum 100000), subject to snapshot size limits. Reuse
   the returned `cursor` on the next call. Normal mode returns the standard
   envelope. CLI `--jsonl` and `--follow` emit newline-delimited event objects
-  without the envelope; they still do not send messages or control the WeChat UI.
+  without the envelope, then a `type=checkpoint` record with `cursor/query/freshness/warnings` after every batch, including empty batches. Handle checkpoints separately from message/session events and persist them after processing the batch; these commands do not send messages or control the WeChat UI. Session `cursor_storage=auto` uses a private local snapshot and a short cursor in normal mode, or inline state in strict read-only mode. Explicit `local` is rejected under strict read-only. Keep the same account and `type_filter`/`keyword`/`unread_only` filters when resuming; `limit` and `scan_limit` may change, while nonzero `offset` is unsupported; pass long inline cursors with `wechat-cli call-json tail < next-poll.json` instead of command-line arguments. Legacy timestamp cursors can upgrade, but cannot recover unread changes before the first state snapshot.
+- Session events use `type=session`, `change=added|updated|removed`, and a stable `session_id`. Removal means leaving the matching visible set, not necessarily deletion from WeChat. Local cursors have a short per-event checkpoint; inline cursors use one batch checkpoint (`freshness.cursor_scope=batch`). Replaying an old cursor may repeat events, so consumers must tolerate retries. Local snapshots retain session identity metadata and state fingerprints, not message bodies; they have no automatic expiry, so historical snapshots accumulate. Missing or corrupt files produce an explicit error and require a new baseline.
 - Use `context` after `search` or `timeline` when you have a message
-  `local_id`/`server_id` and need surrounding conversation. It returns the same
+  `id.message_token` and need surrounding conversation: pass it as `message_token`. Legacy `local_id`/`server_id` inputs remain supported; if combined with a token they must agree. A token is scoped to the account, chat and original message position; a deleted, moved or changed anchor (including server-ID assignment) returns `message_cursor_stale` instead of selecting another row; fetch a fresh timeline in that case. `message_cursor_source_incomplete` requires restoring shard readability before resuming. It returns the same
   agent message shape as timeline plus `context_role=before/anchor/after`.
 - Use `search-context` when the user asks what happened around a keyword hit;
   it combines live FTS search with context windows. Use
-  `timeline --before-message <local_id>` or `--after-message <local_id>` when a
-  message id should become the paging cursor.
+  `timeline --before-message-token <id.message_token>` or `--after-message-token <id.message_token>` when a message should become the paging cursor.
 - Use `history --view agent` only when lower-level filters or ordering are
   needed. Do not use `fields=full` for normal user-facing chat reading.
 - Use `export` only when an explicit local file output is appropriate for large
   single-chat reads; it is a local file write, not part of the default assistant
   read-only tool shortlist.
 - Use `digest-source` for explicit private analysis素材; it records live message
-  source/freshness and a resumable timestamp state under `~/.wechat-cli/digests`.
+  source/freshness and a resumable message checkpoint under `~/.wechat-cli/digests`.
 - Use `archive create` only when the user explicitly requests a plaintext
   SQLite archive. Validate generated archives with `archive validate`; never
   treat an archive as the live source of current messages.
 
 Agent-ready message rows include:
 
-`id(local_id/server_id_str/talker)`, `time`, `create_time`, `time_iso`, `sender`,
+`id(message_token/local_id/server_id_str/talker)`, `time`, `create_time`, `time_iso`, `sender`,
 `sender_wxid`, optional `sender_group_nickname` / `sender_contact_display`,
 `is_from_me`, `kind`, `text`, display-ready `images` / `videos` /
 `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` /
