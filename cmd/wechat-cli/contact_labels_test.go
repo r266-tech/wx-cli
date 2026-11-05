@@ -132,16 +132,3 @@ func TestContactLabelToolsAreOnAssistantSurface(t *testing.T) {
 	}
 }
 
-func TestContactLabelCompanionCommandRouting(t *testing.T) {
-	for _, command := range []string{"labels", "contact-labels", "contact_labels", "contact-tags", "contact_tags"} {
-		if got := companionNormalizeWechatTool(command); got != "contact_labels" {
-			t.Fatalf("companionNormalizeWechatTool(%q) = %q", command, got)
-		}
-	}
-	if got := companionWechatDisplayCommandForTool("contact_labels", ""); got != "labels" {
-		t.Fatalf("contact_labels display command = %q", got)
-	}
-	if got := companionToolLabel("contact_labels"); got != "读取联系人标签" {
-		t.Fatalf("contact_labels companion label = %q", got)
-	}
-}

@@ -17,8 +17,11 @@ RULES = {
 def scan(root):
     root = Path(root).resolve()
     paths = subprocess.check_output(['git', '-C', str(root), 'ls-files', '-z']).decode().split('\0')
+    deleted = set(subprocess.check_output(['git', '-C', str(root), 'ls-files', '--deleted', '-z']).decode().split('\0'))
     errors = []
     for name in filter(None, paths):
+        if name in deleted:
+            continue
         path = root / name
         if path.is_symlink():
             errors.append({'path': name, 'rule': 'symlink'}); continue

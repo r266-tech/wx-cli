@@ -44,7 +44,7 @@ currently macOS-specific:
   under `~/Library/Logs`, and uses Unix-only process attributes.
 - `install.sh` and `scripts/package.sh` only produce Darwin arm64 releases.
 - The bundled `wxkey` behavior is macOS-specific and is treated as an external
-  companion CLI by `wx-mcp`.
+  Companion 已移出本仓库。
 
 The main speed bottlenecks are:
 

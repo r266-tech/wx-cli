@@ -79,7 +79,6 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "asr", Aliases: []string{"voice-asr", "voice_asr"}, Usage: appName + " asr <status|setup>", Description: "Check or install the optional local voice transcription runtime.", Examples: []string{appName + " asr status --pretty", appName + " asr setup --dry-run --pretty", appName + " asr setup --model large-v3"}},
 	{Command: "asr status", Usage: appName + " asr status", Description: "Show local voice ASR readiness without writing files.", Examples: []string{appName + " asr status --pretty"}},
 	{Command: "asr setup", Usage: appName + " asr setup [--dry-run] [--model large-v3] [--skip-model-download]", Description: "Create the wechat-cli ASR virtualenv, install faster-whisper, and optionally preload the default model.", Examples: []string{appName + " asr setup --dry-run --pretty", appName + " asr setup --model large-v3", appName + " asr setup --skip-model-download"}},
-	{Command: "companion", Aliases: []string{"sidecar"}, Usage: appName + " companion [--addr 127.0.0.1:18789] [--desktop=false|--browser|--open=false]", Description: "Start the read-only local WeChat Assistant V1 sidecar GUI. On macOS it opens a native WebKit desktop window by default.", Examples: []string{appName + " companion", appName + " companion --browser", appName + " companion --addr 127.0.0.1:18789 --open=false"}},
 	{Command: "call", Usage: appName + " call <command-or-tool> [--key value ...]", Description: "Call a command/tool with key/value CLI arguments.", Examples: []string{appName + ` call timeline --chat "$CHAT" --limit 20`}},
 	{Command: "call-json", Aliases: []string{"call_json"}, Usage: appName + " call-json <command-or-tool> '<json args>'", Description: "Call a command/tool with a JSON argument object from argv or stdin.", Examples: []string{appName + ` call-json timeline "{\"chat\":\"$CHAT\",\"limit\":20}"`, appName + ` call-json search-context "{\"keyword\":\"$KEYWORD\",\"limit\":5}"`}},
 	{Command: "tool-schema", Aliases: []string{"describe", "describe-tool", "tool_schema"}, Usage: appName + " tool-schema <command-or-tool>", Description: "Return one command/tool schema.", Examples: []string{appName + " tool-schema timeline"}},
@@ -220,9 +219,6 @@ func maybeRunCLI(args []string) bool {
 		return true
 	case "asr", "voice-asr", "voice_asr":
 		runASRCLI(args[1:], opts)
-		return true
-	case "companion", "sidecar":
-		runCompanionCLI(args[1:], opts)
 		return true
 	case "call":
 		runGenericToolCLI(args[1:], opts)

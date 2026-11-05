@@ -1,5 +1,7 @@
 # wechat-cli Agent Guide
 
+Companion 已移出本仓库。
+
 This repository is meant to be installed and operated by an agent for a user on
 macOS or Windows.
 

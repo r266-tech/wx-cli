@@ -120,3 +120,4 @@ Privacy:
 
 One-sentence summary:
 Local-data WeChat CLI for macOS and Windows agents. It lets agents read and search the user's own WeChat messages, media, contacts, Moments, transfers, and red packets through JSON commands.
+# Companion 已移出本仓库。

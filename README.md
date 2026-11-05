@@ -227,7 +227,7 @@ WECHAT_CLI_STRICT_READ_ONLY=1 wechat-cli agent --pretty
 - 图片解码与语音转写缓存
 - `cache refresh/rebuild`
 - `export`
-- Companion 附件上传和 CPU 问答（两者需要写入本地附件或运行文件；状态与聊天读取仍可用）
+- Companion 已移出本仓库。
 
 ## 图片与语音
 
@@ -241,16 +241,6 @@ wechat-cli asr status --pretty
 ```
 
 它会创建 `~/.wechat-cli/asr-venv`，安装 `faster-whisper` 与 `silk-python`。模型、语言、device 与 compute type 会持久化到本机 ASR 配置。首次模型下载可能占用数 GB；只安装依赖可加 `--skip-model-download`。
-
-## 微信助手
-
-```bash
-wechat-cli companion
-```
-
-`companion` 默认只监听 `127.0.0.1:18789`，启动时生成一次随机 bearer token，并通过 URL fragment 交给自动打开的本机窗口；未认证首页不包含 token。
-
-远程监听必须显式传 `--allow-remote`，并自行提供 TLS 或 SSH tunnel。不要把远程 Companion 直接暴露到公网。它是否调用云端模型由后端 CPU 决定；CLI 本身不保存模型密钥。
 
 ## 更新与清理
 
