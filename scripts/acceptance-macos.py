@@ -44,6 +44,16 @@ def validate_digest_windows(first, second):
     return len(left)
 
 
+def sample_timeline(call):
+    # Folded entries are containers. Their underlying conversations have timelines.
+    sessions = call('sessions', {'limit': 10, 'type_filter': 'private,group,official_account'})['sessions']
+    if not sessions:
+        raise ValueError('no sessions')
+    chat = sessions[0]['username']
+    timeline = call('chat_timeline', {'talker': chat, 'limit': 20})['messages']
+    return len(sessions), chat, timeline
+
+
 def main():
     ap=argparse.ArgumentParser();ap.add_argument('--binary',required=True);ap.add_argument('--archive',required=True)
     ap.add_argument('--archive-timeout', type=int, default=600, help='Bounded seconds for full database export (1..3600).')
@@ -84,13 +94,8 @@ def main():
         for name in ('sessions','timeline','context','search','media','digest','archive'):
             checks[name]={'status':'blocked','warning_codes':['keychain_access_required']}
         return finish(a,version,checks)
-    # Discovery data is never written to disk or stdout.
-    # Folded entries (folded groups, official accounts) have no messages of their own.
-    sessions=call('sessions',{'limit':10,'type_filter':'private,group'})['sessions']
-    if not sessions:raise ValueError('no sessions')
-    checks['sessions']={'status':'passed','count':len(sessions)}
-    chat=sessions[0]['username']
-    timeline=call('chat_timeline',{'talker':chat,'limit':20})['messages']
+    session_count, chat, timeline = sample_timeline(call)
+    checks['sessions']={'status':'passed','count':session_count}
     checks['timeline']={'status':'passed' if timeline else 'failed','count':len(timeline)}
     if not timeline:raise ValueError('no live messages')
     # message_token is the documented anchor: local_id can repeat across
