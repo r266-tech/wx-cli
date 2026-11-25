@@ -2097,11 +2097,13 @@ func TestAgentImageRefsFallsBackToThumbnailWhenOnlyThumbnailExists(t *testing.T)
 	}
 
 	images, warnings := agentImageRefs(row, false)
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v", warnings)
+	// The thumbnail is still returned, but never silently: the agent must
+	// know it is looking at a small preview.
+	if len(warnings) != 1 || warnings[0] != "image_thumbnail_only" {
+		t.Fatalf("warnings = %#v, want image_thumbnail_only", warnings)
 	}
-	if len(images) != 1 || images[0]["path"] != "/tmp/sample_t.jpg" {
-		t.Fatalf("images = %#v, want thumbnail fallback", images)
+	if len(images) != 1 || images[0]["path"] != "/tmp/sample_t.jpg" || images[0]["thumbnail"] != true {
+		t.Fatalf("images = %#v, want flagged thumbnail fallback", images)
 	}
 }
 

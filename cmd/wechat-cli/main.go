@@ -2508,7 +2508,39 @@ func agentSimplePayload(r wcdb.Row, kind string) map[string]any {
 
 func agentImageRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
 	paths, warnings := agentImagePaths(r, referenced)
-	return agentMediaRefsFromPaths(r, paths, referenced, "image"), warnings
+	refs := agentMediaRefsFromPaths(r, paths, referenced, "image")
+	if len(refs) == 0 {
+		return refs, warnings
+	}
+	for _, ref := range refs {
+		if agentImagePathVariantRank(stringMapValue(ref, "path")) != 0 {
+			return refs, warnings
+		}
+	}
+	// Only a thumbnail is readable: say so, so the agent does not mistake a
+	// small preview for the picture, and say how to get the original.
+	for _, ref := range refs {
+		ref["thumbnail"] = true
+	}
+	warnings = appendUniqueStrings(warnings, "image_thumbnail_only")
+	if agentImageOriginalNeedsFFmpeg(r, referenced) {
+		warnings = appendUniqueStrings(warnings, "image_original_needs_ffmpeg")
+	}
+	return refs, warnings
+}
+
+func agentImageOriginalNeedsFFmpeg(r wcdb.Row, referenced bool) bool {
+	for _, h := range mapSliceAny(r["media_read_hints"]) {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintIsImage(h) {
+			continue
+		}
+		for _, d := range mapSliceAny(h["local_path_details"]) {
+			if rowString(wcdb.Row(d), "decode_status") == "needs_ffmpeg" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func agentVideoRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
@@ -4191,7 +4223,7 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 	if lastErr == nil {
 		meta["v4_key_source"] = source
 		if ext == "wxgf" {
-			return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+			return finishWXGF(decoded, meta)
 		}
 		return decoded, ext, meta, "decoded", nil
 	}
@@ -4201,7 +4233,7 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 		if lastErr == nil {
 			meta["v4_key_source"] = source
 			if ext == "wxgf" {
-				return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+				return finishWXGF(decoded, meta)
 			}
 			return decoded, ext, meta, "decoded", nil
 		}
