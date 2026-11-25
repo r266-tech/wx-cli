@@ -11,6 +11,27 @@ def message(local_id):
     return {'id': {'local_id': local_id, 'server_id_str': str(local_id), 'talker': 'fixture'}}
 
 
+class SessionAcceptance(unittest.TestCase):
+    def test_timeline_uses_the_conversation_username(self):
+        for kind in ('official_account', 'private', 'group'):
+            with self.subTest(kind=kind):
+                rows = [
+                    {'chat_type': 'folded', 'username': 'fixture_folder'},
+                    {'chat_type': kind, 'username': 'fixture_chat'},
+                ]
+                messages = [message(1)]
+
+                def call(tool, args):
+                    if tool == 'sessions':
+                        allowed = args['type_filter'].split(',')
+                        return {'sessions': [row for row in rows if row['chat_type'] in allowed]}
+                    self.assertEqual(tool, 'chat_timeline')
+                    self.assertEqual(args['talker'], 'fixture_chat')
+                    return {'messages': messages}
+
+                self.assertEqual(acceptance.sample_timeline(call), (1, 'fixture_chat', messages))
+
+
 class DigestAcceptance(unittest.TestCase):
     def test_empty_incremental_window_is_valid(self):
         for empty in [[], None]:
