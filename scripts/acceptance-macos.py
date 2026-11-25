@@ -92,8 +92,10 @@ def main():
     timeline=call('chat_timeline',{'talker':chat,'limit':20})['messages']
     checks['timeline']={'status':'passed' if timeline else 'failed','count':len(timeline)}
     if not timeline:raise ValueError('no live messages')
-    anchor=timeline[len(timeline)//2]['id']['local_id']
-    record('context',lambda:len(call('message_context',{'chat':chat,'local_id':anchor,'before_count':3,'after_count':3})['messages']) or (_ for _ in ()).throw(ValueError()))
+    # message_token is the documented anchor: local_id can repeat across
+    # message shards, and the CLI then rightly refuses to guess.
+    anchor=timeline[len(timeline)//2]['id']['message_token']
+    record('context',lambda:len(call('message_context',{'chat':chat,'message_token':anchor,'before_count':3,'after_count':3})['messages']) or (_ for _ in ()).throw(ValueError()))
     def search():
         for msg in timeline:
             text=msg.get('text','')
