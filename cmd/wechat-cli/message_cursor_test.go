@@ -55,7 +55,7 @@ func TestMessageTokensPageUnsyncedShardTiesAndLocateContext(t *testing.T) {
 				t.Fatalf("%s token page want %q: %#v", tc.order, want, messages)
 			}
 			token := getStr(mapStringAny(messages[0]["id"]), "message_token")
-			if !strings.HasPrefix(token, "msg:v1:") || seen[token] {
+			if !strings.HasPrefix(token, messageTokenV2Prefix) || seen[token] {
 				t.Fatalf("missing/repeated token: %q", token)
 			}
 			seen[token] = true
@@ -217,5 +217,36 @@ func TestHistoryAndSearchExposeUsableMessageTokens(t *testing.T) {
 		if getStr(anchor, "message_token") == "" || anchor["server_id_str"] != mapStringAny(msg["id"])["server_id_str"] {
 			t.Fatalf("search expanded wrong token anchor: %#v", hit)
 		}
+	}
+}
+
+func TestMessageTokenV2CompactRoundTripAndV1Compat(t *testing.T) {
+	tok := messageToken{Account: "0123456789abcdef0123456789abcdef", Talker: "123.4@chatroom", Shard: "biz_message_3.db", LocalID: 42, ServerID: 9007199254740993, SortSeq: 1795597978000, CreateTime: 1795597978}
+	raw := encodeMessageToken(tok)
+	if !strings.HasPrefix(raw, messageTokenV2Prefix) {
+		t.Fatalf("expected v2 token, got %q", raw)
+	}
+	got, err := parseMessageToken(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := tok
+	want.Account = tok.Account[:16]
+	if got != want {
+		t.Fatalf("round trip = %#v, want %#v", got, want)
+	}
+	v1 := messageToken{Account: tok.Account, Talker: "wxid_a", Shard: "message_0.db", LocalID: 1}
+	data, _ := json.Marshal(v1)
+	if back, err := parseMessageToken(messageTokenPrefix + base64.RawURLEncoding.EncodeToString(data)); err != nil || back != v1 {
+		t.Fatalf("v1 token no longer parses: %#v %v", back, err)
+	}
+	for _, bad := range []string{"m2.", "m2.0123456789abcdef.m0.1.2.3", "m2.0123456789abcdef.x0.1.2.3.4.wxid_a", "m2.0123456789abcdef.m0.0.2.3.4.wxid_a", "m2.zz23456789abcdef.m0.1.2.3.4.wxid_a", "m2.0123456789abcdef.m0.1.2.3.4."} {
+		if _, err := parseMessageToken(bad); err == nil {
+			t.Errorf("malformed token accepted: %q", bad)
+		}
+	}
+	s := &server{}
+	if s.tokenAccountMatches(got) {
+		t.Fatal("token must not match a server without an account")
 	}
 }

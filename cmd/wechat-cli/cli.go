@@ -915,6 +915,28 @@ func cliResultRows(result any) ([]map[string]any, bool) {
 	}
 }
 
+// cliSessionRows drops fields only internal code needs: raw type codes that
+// last_msg_kind_name already names, and sort_timestamp when it repeats
+// last_timestamp. Internal callers read the unshaped rows.
+func cliSessionRows(rows []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		shaped := make(map[string]any, len(row))
+		for k, v := range row {
+			shaped[k] = v
+		}
+		if _, named := shaped["last_msg_kind_name"]; named {
+			delete(shaped, "last_msg_type")
+			delete(shaped, "last_msg_sub_type")
+		}
+		if int64MapValue(shaped, "sort_timestamp") == int64MapValue(shaped, "last_timestamp") {
+			delete(shaped, "sort_timestamp")
+		}
+		out = append(out, shaped)
+	}
+	return out
+}
+
 func cliRowsResultMetadata(result any) (map[string]any, []string) {
 	switch result := result.(type) {
 	case cliRowsResult:
@@ -928,6 +950,9 @@ func cliRowsResultMetadata(result any) (map[string]any, []string) {
 }
 
 func cliResultRowsForTool(tool string, args map[string]any, rows []map[string]any) []map[string]any {
+	if tool == "sessions" || tool == "unread" {
+		return cliSessionRows(rows)
+	}
 	if tool != "search" {
 		return rows
 	}
@@ -995,7 +1020,6 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 			"server_id_str": row["server_id_str"],
 			"message_token": row["message_token"],
 		}),
-		"time":                   formatUnixLocal(createTime),
 		"time_iso":               cliFormatUnixISO(createTime),
 		"create_time":            row["create_time"],
 		"sender":                 firstNonEmpty(stringMapValue(row, "sender_display_name"), stringMapValue(row, "sender_wxid")),
@@ -1016,6 +1040,7 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 	if match == text {
 		delete(out, "match")
 	}
+	dropDuplicateSenderNames(out)
 	if !getBoolDefault(args, "include_text", true) {
 		delete(out, "text")
 		delete(out, "match")

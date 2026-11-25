@@ -266,14 +266,19 @@ installer does not install a launchd watcher by default.
 
 Agent-ready message rows include:
 
-`id(message_token/local_id/server_id_str/talker)`, `time`, `create_time`, `time_iso`, `sender`,
-`sender_wxid`, optional `sender_group_nickname` / `sender_contact_display`,
+`id(message_token/local_id/server_id_str/talker)`, `create_time`, `time_iso`, `sender`,
+`sender_wxid`, optional `sender_group_nickname` / `sender_contact_display` (only
+when they differ from `sender`),
 `is_from_me`, `mentions_me` / `mentions_all` (group @ you / @all, only when
 true), `kind`, `text`, display-ready `images` / `videos` /
 `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` /
 `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and
 concise `warnings`. System rows carry the sentence WeChat shows, not sysmsg
-XML. A `chat_ambiguous` error lists `error.candidates` (`id`, `display_name`,
+XML, with embedded wxids replaced by names. Since 2.0.7 rows no longer carry
+the timezone-less `time`; message tokens are compact `m2.` strings (old
+`msg:v1:` tokens still resume). `sessions` / `unread` rows drop raw
+`last_msg_type` / `last_msg_sub_type` and repeat `sort_timestamp` only when it
+differs from `last_timestamp`. A `chat_ambiguous` error lists `error.candidates` (`id`, `display_name`,
 `chat_type`); retry with the chosen `id`. `context` also accepts `--before` /
 `--after` for `--before-count` / `--after-count`.
 `media` remains path/resource-first, but includes `id`, `time`, `time_iso`,
@@ -289,6 +294,7 @@ SILK, and duplicate candidate paths belong in `include_debug=true`,
 Image refs flagged `thumbnail: true` (warning `image_thumbnail_only`) are small
 previews, not the picture. Most WeChat 4.x originals are WXGF and need `ffmpeg`;
 on `image_original_needs_ffmpeg`, run `brew install ffmpeg` and read again.
+Animated WXGF originals return their first frame at full size.
 On `voice_asr_not_installed`, `wechat-cli asr setup` installs local voice
 transcription (no user input; downloads a speech model). A WeChat note (笔记)
 is `kind: note` with the same item list as `forward_chat`.

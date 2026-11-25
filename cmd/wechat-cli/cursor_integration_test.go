@@ -28,7 +28,7 @@ func TestTailMessageTokensResumeUnsyncedShardTies(t *testing.T) {
 			t.Fatalf("tail wanted %q: %#v", want, events)
 		}
 		next := getStr(env, "cursor")
-		if !strings.HasPrefix(next, messageTokenPrefix) || next == getStr(args, "cursor") || next != getStr(events[0], "cursor") {
+		if !isMessageToken(next) || next == getStr(args, "cursor") || next != getStr(events[0], "cursor") {
 			t.Fatalf("invalid tail cursor progression: %#v", env)
 		}
 		args["cursor"] = next

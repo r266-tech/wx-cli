@@ -393,6 +393,17 @@ func addOptionalGroupIdentity(out map[string]any, row wcdb.Row) {
 	}
 }
 
+// dropDuplicateSenderNames keeps the alternate names only when they add
+// information beyond the primary sender string.
+func dropDuplicateSenderNames(out map[string]any) {
+	sender, _ := out["sender"].(string)
+	for _, key := range []string{"sender_group_nickname", "sender_contact_display"} {
+		if v, _ := out[key].(string); v == "" || v == sender {
+			delete(out, key)
+		}
+	}
+}
+
 func attachGroupNicknames(
 	rows []wcdb.Row,
 	roomDataLookup func(map[string]map[string]bool) map[string]map[string]string,
@@ -425,6 +436,61 @@ func (s *server) attachMessageDisplayNames(rows []wcdb.Row) {
 		[2]string{"talker", "talker_display_name"},
 		[2]string{"sender_wxid", "sender_display_name"})
 	attachGroupNicknames(rows, s.lookupRoomDataNicknames, s.lookupQuoteGroupNicknames)
+	attachSystemTextNames(rows, s.lookupRoomDataNicknames, s.lookupDisplayNames)
+}
+
+// attachSystemTextNames replaces the bare wxids WeChat embeds in inline
+// system text ("你领取了$wxid_x$的红包") with the group card or contact name.
+func attachSystemTextNames(
+	rows []wcdb.Row,
+	roomDataLookup func(map[string]map[string]bool) map[string]map[string]string,
+	displayLookup func(map[string]bool) map[string]string,
+) {
+	refs := make(map[int][]string)
+	rooms := make(map[string]map[string]bool)
+	contacts := make(map[string]bool)
+	for i, row := range rows {
+		raw := rowString(row, "message_content")
+		if rowInt64(row, "base_kind") != 10000 || strings.Contains(raw, "<sysmsg") {
+			continue
+		}
+		for _, m := range systemWxidToken.FindAllStringSubmatch(raw, 8) {
+			id := m[1]
+			if len(id) > maxIdentityUsernameBytes {
+				continue
+			}
+			refs[i] = append(refs[i], id)
+			contacts[id] = true
+			if room := rowString(row, "talker"); strings.HasSuffix(room, "@chatroom") {
+				if rooms[room] == nil {
+					rooms[room] = make(map[string]bool)
+				}
+				rooms[room][id] = true
+			}
+		}
+	}
+	if len(refs) == 0 {
+		return
+	}
+	var roomNames map[string]map[string]string
+	if len(rooms) > 0 {
+		roomNames = roomDataLookup(rooms)
+	}
+	names := displayLookup(contacts)
+	for i, ids := range refs {
+		row := rows[i]
+		summary := rowString(row, "content_summary")
+		for _, id := range ids {
+			name := strings.TrimSpace(roomNames[rowString(row, "talker")][id])
+			if name == "" {
+				name = strings.TrimSpace(names[id])
+			}
+			if name != "" && name != id {
+				summary = strings.ReplaceAll(summary, id, name)
+			}
+		}
+		row["content_summary"] = summary
+	}
 }
 
 func (s *server) lookupRoomDataNicknames(needed map[string]map[string]bool) map[string]map[string]string {
