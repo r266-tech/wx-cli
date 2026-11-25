@@ -1376,7 +1376,6 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 	}
 	out := map[string]any{
 		"id":          agentMessageID(r),
-		"time":        agentMessageTime(r),
 		"create_time": rowInt64(r, "create_time"),
 		"time_iso":    agentMessageTimeISO(r),
 		"sender":      agentMessageSender(r),
@@ -1386,6 +1385,7 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 		"text":        agentMessageText(r),
 	}
 	addOptionalGroupIdentity(out, r)
+	dropDuplicateSenderNames(out)
 	for _, k := range []string{"mentions_me", "mentions_all"} {
 		if v, _ := r[k].(bool); v {
 			out[k] = true

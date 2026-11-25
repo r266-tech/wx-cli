@@ -114,3 +114,30 @@ func stringsToAny(in []string) []any {
 	}
 	return out
 }
+
+func TestAnimatedWXGFDecodesFirstFrame(t *testing.T) {
+	ffmpeg := findFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not installed")
+	}
+	var frames [][]byte
+	for i := 0; i < 6; i++ {
+		hevc, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=size=320x240", "-frames:v", "1", "-c:v", "libx265", "-f", "hevc", "pipe:1").Output()
+		if err != nil || len(hevc) == 0 {
+			t.Skip("ffmpeg cannot encode HEVC here")
+		}
+		frames = append(frames, hevc)
+	}
+	jpg, ext, meta, status, err := finishWXGF(wrapWXGF(frames...), map[string]any{})
+	if err != nil || status != "decoded" || ext != "jpg" || imageExtForData(jpg) != "jpg" || meta["animated"] != true {
+		t.Fatalf("status=%q ext=%q meta=%v err=%v", status, ext, meta, err)
+	}
+	frames = frames[:0]
+	for i := 0; i < 8; i++ {
+		frames = append(frames, annexB(500))
+	}
+	_, _, meta, status, err = finishWXGF(wrapWXGF(frames...), map[string]any{})
+	if status != "unsupported_format" || !errors.Is(err, errWXGFAnimated) || meta["animated"] != true {
+		t.Fatalf("undecodable animation: status=%q meta=%v err=%v", status, meta, err)
+	}
+}

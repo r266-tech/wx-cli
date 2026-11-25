@@ -7,13 +7,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 )
 
 const messageTokenPrefix = "msg:v1:"
+const messageTokenV2Prefix = "m2."
 const maxMessageTokenLength = 4096
+
+// v2 tokens are about a third of v1's size. Every message row carries one, so
+// they were over a third of a timeline's bytes. Format:
+// m2.<account 16 hex>.<m|b><shard number>.<local>.<server>.<sort>.<create>.<talker>
+// with numbers in base 36; talker is last because it may contain dots.
+// v1 tokens stay accepted, so saved cursors keep working.
+var messageTokenShardRE = regexp.MustCompile(`^(message|biz_message)_(\d+)\.db$`)
+
+func isMessageToken(raw string) bool {
+	return strings.HasPrefix(raw, messageTokenPrefix) || strings.HasPrefix(raw, messageTokenV2Prefix)
+}
 
 // A token is a versioned locator, not an authorization credential. All fields
 // are checked against the active account and an actual row in its original
@@ -30,21 +44,87 @@ type messageToken struct {
 
 func parseMessageToken(raw string) (messageToken, error) {
 	var token messageToken
-	if len(raw) > maxMessageTokenLength || !strings.HasPrefix(raw, messageTokenPrefix) {
+	if len(raw) > maxMessageTokenLength {
 		return token, fmt.Errorf("message_cursor_invalid: unsupported or oversized message token")
 	}
-	data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(raw, messageTokenPrefix))
-	if err != nil {
-		return token, fmt.Errorf("message_cursor_invalid: malformed message token")
-	}
-	if err := json.Unmarshal(data, &token); err != nil {
-		return token, fmt.Errorf("message_cursor_invalid: malformed message token payload")
+	accountBytes := 16
+	switch {
+	case strings.HasPrefix(raw, messageTokenV2Prefix):
+		parsed, ok := parseMessageTokenV2(strings.TrimPrefix(raw, messageTokenV2Prefix))
+		if !ok {
+			return token, fmt.Errorf("message_cursor_invalid: malformed message token")
+		}
+		token, accountBytes = parsed, 8
+	case strings.HasPrefix(raw, messageTokenPrefix):
+		data, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(raw, messageTokenPrefix))
+		if err != nil {
+			return token, fmt.Errorf("message_cursor_invalid: malformed message token")
+		}
+		if err := json.Unmarshal(data, &token); err != nil {
+			return token, fmt.Errorf("message_cursor_invalid: malformed message token payload")
+		}
+	default:
+		return token, fmt.Errorf("message_cursor_invalid: unsupported or oversized message token")
 	}
 	account, err := hex.DecodeString(token.Account)
-	if err != nil || len(account) != 16 || token.Talker == "" || len(token.Talker) > 1024 || !msgShardRE.MatchString(token.Shard) || filepath.Base(token.Shard) != token.Shard || token.LocalID <= 0 {
+	if err != nil || len(account) != accountBytes || token.Talker == "" || len(token.Talker) > 1024 || !msgShardRE.MatchString(token.Shard) || filepath.Base(token.Shard) != token.Shard || token.LocalID <= 0 {
 		return token, fmt.Errorf("message_cursor_invalid: invalid message token identity")
 	}
 	return token, nil
+}
+
+func parseMessageTokenV2(body string) (messageToken, bool) {
+	var token messageToken
+	parts := strings.SplitN(body, ".", 7)
+	if len(parts) != 7 || len(parts[1]) < 2 {
+		return token, false
+	}
+	switch parts[1][0] {
+	case 'm':
+		token.Shard = "message_" + parts[1][1:] + ".db"
+	case 'b':
+		token.Shard = "biz_message_" + parts[1][1:] + ".db"
+	default:
+		return token, false
+	}
+	nums := make([]int64, 4)
+	for i := range nums {
+		n, err := strconv.ParseInt(parts[2+i], 36, 64)
+		if err != nil {
+			return token, false
+		}
+		nums[i] = n
+	}
+	token.Account = parts[0]
+	token.LocalID, token.ServerID, token.SortSeq, token.CreateTime = nums[0], nums[1], nums[2], nums[3]
+	token.Talker = parts[6]
+	return token, true
+}
+
+func encodeMessageToken(token messageToken) string {
+	if m := messageTokenShardRE.FindStringSubmatch(token.Shard); m != nil && len(token.Account) >= 16 {
+		kind := "m"
+		if m[1] == "biz_message" {
+			kind = "b"
+		}
+		return messageTokenV2Prefix + strings.Join([]string{
+			token.Account[:16], kind + m[2],
+			strconv.FormatInt(token.LocalID, 36), strconv.FormatInt(token.ServerID, 36),
+			strconv.FormatInt(token.SortSeq, 36), strconv.FormatInt(token.CreateTime, 36),
+			token.Talker,
+		}, ".")
+	}
+	data, _ := json.Marshal(token)
+	return messageTokenPrefix + base64.RawURLEncoding.EncodeToString(data)
+}
+
+// tokenAccountMatches accepts the full v1 account hash or the v2 prefix.
+func (s *server) tokenAccountMatches(token messageToken) bool {
+	full := s.messageTokenAccount()
+	if full == "" {
+		return false
+	}
+	return token.Account == full || (len(token.Account) == 16 && strings.HasPrefix(full, token.Account))
 }
 
 func (s *server) messageTokenAccount() string {
@@ -68,8 +148,7 @@ func (s *server) attachMessageToken(talker, shard string, row wcdb.Row) {
 	if token.Account == "" {
 		return
 	}
-	data, _ := json.Marshal(token)
-	row["message_token"] = messageTokenPrefix + base64.RawURLEncoding.EncodeToString(data)
+	row["message_token"] = encodeMessageToken(token)
 }
 
 func (s *server) validateMessageTokenScope(raw, talker string) (messageToken, error) {
@@ -82,7 +161,7 @@ func (s *server) validateMessageTokenScope(raw, talker string) (messageToken, er
 			return token, err
 		}
 	}
-	if token.Account != s.messageTokenAccount() || token.Talker != talker {
+	if !s.tokenAccountMatches(token) || token.Talker != talker {
 		return token, fmt.Errorf("message_cursor_scope_mismatch: message token belongs to another account or conversation")
 	}
 	return token, nil
@@ -104,7 +183,7 @@ func (s *server) findMessageTokenAnchor(shards []msgShardDB, tableName string, r
 	if err != nil {
 		return nil, err
 	}
-	if token.Account != s.messageTokenAccount() || tableName != "Msg_"+talkerHash(token.Talker) {
+	if !s.tokenAccountMatches(token) || tableName != "Msg_"+talkerHash(token.Talker) {
 		return nil, fmt.Errorf("message_cursor_scope_mismatch: message token belongs to another account or conversation")
 	}
 	if (ref.LocalID != 0 && ref.LocalID != token.LocalID) || (ref.ServerID != 0 && ref.ServerID != token.ServerID) {

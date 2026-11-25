@@ -111,7 +111,7 @@ wechat-cli watch --mode sessions --jsonl --follow
 wechat-cli call-json tail < next-poll.json
 ```
 
-`next-poll.json` 使用 `{"mode":"sessions","cursor":"<上次返回的完整 cursor>","cursor_storage":"inline"}`，并保留原筛选条件。`msg:v1` 消息 token 也应原样保存，不自行解析或拼接；它绑定账号、会话和原始消息位置。原锚点删除、迁移或排序/身份字段改变（包括未同步消息补齐 server ID）会返回 `message_cursor_stale`，此时重新读取 timeline 获取锚点；不能把 token 当作永久消息 ID。分片未完整可读时返回 `message_cursor_source_incomplete`，恢复可读后重试，不绕过游标继续推进。旧 `server_id_str` / `local_id` 参数继续支持；同传 token 与旧 ID 时必须一致。
+`next-poll.json` 使用 `{"mode":"sessions","cursor":"<上次返回的完整 cursor>","cursor_storage":"inline"}`，并保留原筛选条件。消息 token（当前 `m2.` 紧凑格式，旧 `msg:v1:` 仍可续传）也应原样保存，不自行解析或拼接；它绑定账号、会话和原始消息位置。原锚点删除、迁移或排序/身份字段改变（包括未同步消息补齐 server ID）会返回 `message_cursor_stale`，此时重新读取 timeline 获取锚点；不能把 token 当作永久消息 ID。回滚到 2.0.6 及更早版本后，保存的 `m2.` token 会返回 `message_cursor_invalid`，重新读取 timeline 即可。分片未完整可读时返回 `message_cursor_source_incomplete`，恢复可读后重试，不绕过游标继续推进。旧 `server_id_str` / `local_id` 参数继续支持；同传 token 与旧 ID 时必须一致。
 
 本机游标依赖私有快照文件；目前不会自动过期，历史变更快照会累计占用磁盘，文件缺失或损坏会明确报错，此时需要重新建立基线。快照只保存会话标识元数据和状态指纹，不保存聊天正文；没有变化时复用原快照。inline 游标使用批次检查点（`freshness.cursor_scope=batch`），应在处理完整批次后保存顶层 `cursor`；单个事件不会重复携带完整 inline 游标。本机模式可以保存每事件的短游标。重试旧游标可能重放事件，消费端应允许重试。
 
@@ -187,11 +187,11 @@ manifest、来源时间、key epoch 和每个数据库的 SHA-256，不改变实
 
 ```json
 {
-  "id": {"local_id": 123, "server_id_str": "9876543210", "talker": "xxx@chatroom"},
+  "id": {"local_id": 123, "server_id_str": "9876543210", "talker": "xxx@chatroom", "message_token": "m2.…"},
   "time_iso": "2026-05-26T13:00:00+08:00",
+  "create_time": 1779771600,
   "sender": "Room Nickname",
   "sender_wxid": "wxid_alice",
-  "sender_group_nickname": "Room Nickname",
   "sender_contact_display": "Alice",
   "is_from_me": false,
   "kind": "image",
@@ -201,15 +201,19 @@ manifest、来源时间、key epoch 和每个数据库的 SHA-256，不改变实
 ```
 
 群消息优先使用可可靠解析的群内昵称作为 `sender`。`sender_wxid` 保留稳定身份，
-`sender_contact_display` 与 `sender_group_nickname` 仅在对应信息可可靠解析时返回。
+`sender_contact_display` 与 `sender_group_nickname` 仅在可可靠解析且与 `sender` 不同时返回。
+时间只给带时区的 `time_iso` 和秒级 `create_time`（2.0.7 起去掉了无时区的 `time`）。
 群消息里 @ 了你时带 `mentions_me: true`，@所有人 时带 `mentions_all: true`。
-系统消息（入群、撤回、改群名、红包领取等）给出微信界面上显示的那句话，不给原始 XML。
+系统消息（入群、撤回、改群名、红包领取等）给出微信界面上显示的那句话，不给原始 XML；其中的 wxid 换成群名片或联系人名。
 同名文件被微信存成 `name(1).ext` 时，按这条消息记录的文件大小挑出属于它的那份；大小对不上时全部返回。
 
 图片默认给原图；微信 4.x 的原图多为 WXGF 格式，需要本机有 `ffmpeg`
 （`brew install ffmpeg`）才能转换。只拿得到缩略图时，图片带 `thumbnail: true`，
 消息带 `image_thumbnail_only` 警告；装上 ffmpeg 就能解决时，还会带
-`image_original_needs_ffmpeg`。
+`image_original_needs_ffmpeg`。动图原图给第一帧的全尺寸图；第一帧也解不出来时才退回缩略图。
+
+`sessions` / `unread` 行不再带 `last_msg_type` / `last_msg_sub_type` 原始类型码（看 `last_msg_kind_name`），
+`sort_timestamp` 只在和 `last_timestamp` 不同时返回。
 
 默认只返回人能在微信里看到、且 agent 可直接使用的信息。raw XML、CDN key、协议码、不可读 `.dat` 与候选路径只在 debug/full 输出中出现。
 

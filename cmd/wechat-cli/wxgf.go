@@ -19,12 +19,12 @@ import (
 
 var (
 	errWXGFNeedsFFmpeg = errors.New("WXGF original image needs ffmpeg to convert; install ffmpeg (macOS: `brew install ffmpeg`, no user input needed), then read again")
-	errWXGFAnimated    = errors.New("animated WXGF image is not converted; the thumbnail is returned")
+	errWXGFAnimated    = errors.New("animated WXGF first frame could not be decoded; the thumbnail is returned")
 )
 
 const wxgfStillMinRatio = 0.6
 
-func wxgfStillPartition(data []byte) ([]byte, error) {
+func wxgfPartitions(data []byte) ([][]byte, error) {
 	if len(data) < 15 || !bytes.Equal(data[:4], []byte("wxgf")) {
 		return nil, fmt.Errorf("invalid WXGF header")
 	}
@@ -33,8 +33,7 @@ func wxgfStillPartition(data []byte) ([]byte, error) {
 		return nil, fmt.Errorf("invalid WXGF header length")
 	}
 	start := []byte{0x00, 0x00, 0x00, 0x01}
-	var best []byte
-	count := 0
+	var parts [][]byte
 	for pos := headerLen; pos < len(data); {
 		idx := bytes.Index(data[pos:], start)
 		if idx < 0 {
@@ -50,19 +49,40 @@ func wxgfStillPartition(data []byte) ([]byte, error) {
 			pos = abs + 1
 			continue
 		}
-		count++
-		if length > len(best) {
-			best = data[abs : abs+length]
-		}
+		parts = append(parts, data[abs:abs+length])
 		pos = abs + length
 	}
-	if best == nil {
+	if len(parts) == 0 {
 		return nil, fmt.Errorf("no HEVC partition in WXGF data")
 	}
-	if count > 1 && float64(len(best))/float64(len(data)) < wxgfStillMinRatio {
+	return parts, nil
+}
+
+func wxgfStillPartition(data []byte) ([]byte, error) {
+	parts, err := wxgfPartitions(data)
+	if err != nil {
+		return nil, err
+	}
+	var best []byte
+	for _, p := range parts {
+		if len(p) > len(best) {
+			best = p
+		}
+	}
+	if len(parts) > 1 && float64(len(best))/float64(len(data)) < wxgfStillMinRatio {
 		return nil, errWXGFAnimated
 	}
 	return best, nil
+}
+
+// wxgfFirstFrameStream is the animated case: the partitions in order form one
+// Annex-B stream, and decoding its first frame gives a full-size still.
+func wxgfFirstFrameStream(data []byte) ([]byte, error) {
+	parts, err := wxgfPartitions(data)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.Join(parts, nil), nil
 }
 
 var (
@@ -99,11 +119,24 @@ func findFFmpeg() string {
 	return ffmpegPath
 }
 
-func convertWXGFToJPEG(data []byte) ([]byte, error) {
+func convertWXGFToJPEG(data []byte) ([]byte, bool, error) {
+	animated := false
 	hevc, err := wxgfStillPartition(data)
-	if err != nil {
-		return nil, err
+	if errors.Is(err, errWXGFAnimated) {
+		animated = true
+		hevc, err = wxgfFirstFrameStream(data)
 	}
+	if err != nil {
+		return nil, animated, err
+	}
+	jpg, err := ffmpegHEVCFirstFrame(hevc)
+	if err != nil && animated {
+		return nil, true, fmt.Errorf("%w: %v", errWXGFAnimated, err)
+	}
+	return jpg, animated, err
+}
+
+func ffmpegHEVCFirstFrame(hevc []byte) ([]byte, error) {
 	ffmpeg := locateFFmpeg()
 	if ffmpeg == "" {
 		return nil, errWXGFNeedsFFmpeg
@@ -129,7 +162,10 @@ func convertWXGFToJPEG(data []byte) ([]byte, error) {
 // and otherwise reports a status the agent can act on.
 func finishWXGF(decoded []byte, meta map[string]any) ([]byte, string, map[string]any, string, error) {
 	meta["source_format"] = "wxgf"
-	jpg, err := convertWXGFToJPEG(decoded)
+	jpg, animated, err := convertWXGFToJPEG(decoded)
+	if animated {
+		meta["animated"] = true
+	}
 	switch {
 	case err == nil:
 		meta["converter"] = "ffmpeg"

@@ -368,8 +368,9 @@ func TestGroupNicknameFieldsSurviveAgentLiteAndSearchViews(t *testing.T) {
 	}
 
 	agent := agentMessage(copyRow(row))
+	// The group nickname is the primary sender; repeating it adds nothing.
 	if agent["sender"] != "Group Card A" ||
-		agent["sender_group_nickname"] != "Group Card A" ||
+		agent["sender_group_nickname"] != nil ||
 		agent["sender_contact_display"] != "Contact A" {
 		t.Fatalf("agent view lost group identity fields: %#v", agent)
 	}
@@ -380,8 +381,9 @@ func TestGroupNicknameFieldsSurviveAgentLiteAndSearchViews(t *testing.T) {
 	}
 
 	search := cliSearchMessageRow(map[string]any(row), map[string]any{})
+	// The group nickname is the primary sender; repeating it adds nothing.
 	if search["sender"] != "Group Card A" ||
-		search["sender_group_nickname"] != "Group Card A" ||
+		search["sender_group_nickname"] != nil ||
 		search["sender_contact_display"] != "Contact A" {
 		t.Fatalf("search view lost group identity fields: %#v", search)
 	}

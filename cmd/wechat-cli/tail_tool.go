@@ -325,7 +325,7 @@ func sessionEventCandidateAfter(candidate sessionEventCandidate, cursor sessionR
 func applyReadEventsCursor(args map[string]any, cursor string) {
 	cursor = strings.TrimSpace(cursor)
 	switch {
-	case strings.HasPrefix(cursor, messageTokenPrefix):
+	case isMessageToken(cursor):
 		if _, err := parseMessageToken(cursor); err == nil {
 			args["after_message_token"] = cursor
 		}

@@ -521,7 +521,7 @@ var toolDefs = []toolDef{
 			"mode":                enumStrProp("auto (默认) / messages / sessions", "auto", "messages", "sessions"),
 			"talker":              strProp("可选: 限定 wxid 或 xxx@chatroom; 存在时观察该会话新消息"),
 			"chat":                strProp("可选: 昵称/备注/群名, 自动解析为 talker"),
-			"cursor":              strProp("上次返回的不透明 cursor, 原样续传; messages 优先 msg:v1, sessions 为绑定账号与筛选的快照游标; 兼容旧游标"),
+			"cursor":              strProp("上次返回的不透明 cursor, 原样续传; messages 为消息 token(m2. 或旧 msg:v1:), sessions 为绑定账号与筛选的快照游标; 兼容旧游标"),
 			"cursor_storage":      enumStrProp("sessions 游标: auto 普通模式使用本机私有快照、strict read-only 使用 inline; local 在 strict 下拒绝; inline 无游标状态文件", "auto", "local", "inline"),
 			"type_filter":         strProp("sessions 会话类型筛选: all/private/group/official_account/folded/bot, 可逗号分隔; 续读时须保持一致"),
 			"keyword":             strProp("sessions 会话关键词筛选; 续读时须保持一致"),

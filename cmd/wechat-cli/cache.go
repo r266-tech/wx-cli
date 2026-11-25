@@ -1494,10 +1494,17 @@ func requireCompleteMessageSource(warnings []string) error {
 	return nil
 }
 
+func agentMarkdownTime(m map[string]any) string {
+	if ts := int64MapValue(m, "create_time"); ts > 0 {
+		return formatUnixLocal(ts)
+	}
+	return firstNonEmpty(stringMapValue(m, "time"), stringMapValue(m, "time_iso"))
+}
+
 func renderAgentMessageMarkdown(m map[string]any) string {
 	var b strings.Builder
 	b.WriteString("### ")
-	b.WriteString(stringMapValue(m, "time"))
+	b.WriteString(agentMarkdownTime(m))
 	if sender := stringMapValue(m, "sender"); sender != "" {
 		b.WriteString(" / ")
 		b.WriteString(sender)
@@ -1521,7 +1528,7 @@ func renderAgentMessageMarkdown(m map[string]any) string {
 func renderAgentMessageHTMLSection(m map[string]any) string {
 	var b strings.Builder
 	b.WriteString("<section><h3>")
-	b.WriteString(html.EscapeString(stringMapValue(m, "time")))
+	b.WriteString(html.EscapeString(agentMarkdownTime(m)))
 	if sender := stringMapValue(m, "sender"); sender != "" {
 		b.WriteString(" / ")
 		b.WriteString(html.EscapeString(sender))
