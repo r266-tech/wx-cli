@@ -134,7 +134,7 @@ Environment:
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
   WXKEY_GO_INSTALL          Go package/version for source fallback
-                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.9).
+                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.10).
 EOF
 }
 
@@ -651,7 +651,7 @@ resolve_components() {
     WXKEY_SOURCE="$SOURCE_DIR/../wxkey/wxkey"
   elif have_cmd go; then
     WXKEY_MODE="go-install"
-    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.9}"
+    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.10}"
   elif have_cmd wxkey; then
     WXKEY_MODE="copy"
     WXKEY_SOURCE="$(command -v wxkey)"

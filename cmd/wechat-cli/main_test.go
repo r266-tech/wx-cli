@@ -362,8 +362,11 @@ func TestCLISearchMessageRowCanTrimText(t *testing.T) {
 		"content":             "不是ABCDEFG而是HIJKLMN",
 	}
 	got := cliSearchMessageRow(row, map[string]any{"snippet_only": true, "max_text_chars": int64(4)})
-	if got["text"] != "不是AB" || got["match"] != "不是AB" {
+	if got["text"] != "不是AB" {
 		t.Fatalf("trimmed row = %#v", got)
+	}
+	if _, ok := got["match"]; ok {
+		t.Fatalf("match identical to text must be omitted: %#v", got)
 	}
 	if got["text_truncated"] != true || got["original_text_chars"] == nil {
 		t.Fatalf("truncation metadata = %#v", got)
@@ -2097,11 +2100,13 @@ func TestAgentImageRefsFallsBackToThumbnailWhenOnlyThumbnailExists(t *testing.T)
 	}
 
 	images, warnings := agentImageRefs(row, false)
-	if len(warnings) != 0 {
-		t.Fatalf("warnings = %#v", warnings)
+	// The thumbnail is still returned, but never silently: the agent must
+	// know it is looking at a small preview.
+	if len(warnings) != 1 || warnings[0] != "image_thumbnail_only" {
+		t.Fatalf("warnings = %#v, want image_thumbnail_only", warnings)
 	}
-	if len(images) != 1 || images[0]["path"] != "/tmp/sample_t.jpg" {
-		t.Fatalf("images = %#v, want thumbnail fallback", images)
+	if len(images) != 1 || images[0]["path"] != "/tmp/sample_t.jpg" || images[0]["thumbnail"] != true {
+		t.Fatalf("images = %#v, want flagged thumbnail fallback", images)
 	}
 }
 

@@ -561,7 +561,7 @@ var toolDefs = []toolDef{
 			"before":                strProp("可选: 截止时间"),
 			"sender":                strProp("可选: sender wxid/昵称; 可传 me/self 表示自己"),
 			"from_me":               boolProp("仅返回自己发出的媒体消息; 等价 sender=me"),
-			"type":                  strProp("可选: kind_name, 如 image/video/file/forward_chat/miniprogram"),
+			"type":                  strProp("可选: kind_name, 如 image/video/file/note/forward_chat/miniprogram"),
 			"kind_name":             strProp("可选: 同 type"),
 			"base_kind":             intProp("可选: base_kind raw int"),
 			"resource_family":       strProp("可选: image / video / file / cover / unknown"),
@@ -810,7 +810,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "unread",
-		Description: "未读会话列表. live session DB; 字段同 sessions, 仅返回 unread_count > 0. type_filter/filter 支持 private,group 等逗号分隔.",
+		Description: "未读会话列表. live session DB; 字段同 sessions, 仅返回 unread_count > 0. 默认含公众号与折叠入口; 只看真人用 type_filter=private,group. 群消息里 mentions_me/mentions_all 标出 @ 我 / @所有人 (见 timeline).",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
 			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),

@@ -106,10 +106,15 @@ func (s *server) resolveLiveChat(query, typeFilter string) (string, error) {
 		return "", err
 	}
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("chat %q not found; call resolve-chat to inspect candidates", query)
+		return "", fmt.Errorf("chat_not_found: no chat or contact matches %q", query)
 	}
 	if ambiguousChatCandidates(candidates) || (len(warnings) > 0 && !strings.Contains(candidates[0].Match, "_exact")) {
-		return "", fmt.Errorf("chat %q is ambiguous; call resolve-chat and pass a returned username/talker", query)
+		// Name the candidates so the agent can retry without another call.
+		names := make([]string, 0, len(candidates))
+		for _, c := range candidates {
+			names = append(names, fmt.Sprintf("%s (%s, %s)", c.DisplayName, c.Username, c.ChatType))
+		}
+		return "", fmt.Errorf("chat_ambiguous: %q matches %s; retry with one of these ids", query, strings.Join(names, "; "))
 	}
 	return candidates[0].Username, nil
 }

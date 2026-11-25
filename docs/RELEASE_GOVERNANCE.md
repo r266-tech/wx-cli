@@ -21,7 +21,7 @@ source tag or asset name.
 
 ## Build inputs
 
-`release-dependencies.json` pins wxkey v1.4.9 by full commit and WCDB 2.1.16 by
+`release-dependencies.json` pins wxkey v1.4.10 by full commit and WCDB 2.1.16 by
 upstream release ZIP SHA256 and source commit. WCDB builds with CMake for arm64,
 macOS 12+, CommonCrypto and zstd disabled. Runtime message decompression remains
 in Go. The build reads no user's WeChat database and requires no sibling checkout.

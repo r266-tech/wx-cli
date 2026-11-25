@@ -27,7 +27,7 @@ var AppSubtypeNames = map[int32]string{
 	6:    "file",
 	8:    "file",
 	19:   "forward_chat",
-	24:   "file",
+	24:   "note",
 	33:   "miniprogram",
 	36:   "miniprogram",
 	49:   "link",

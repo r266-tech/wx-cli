@@ -439,6 +439,7 @@ func readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists bool) map[strin
 		"context":         liveRead,
 		"tail":            liveRead,
 		"media":           liveRead,
+		"image_originals": liveRead && locateFFmpeg() != "",
 		"voice_asr":       asrReadyBool(asrStatusData()["wechat_voice_ready"]),
 		"name_resolution": liveRead,
 	}
@@ -592,6 +593,7 @@ func readOSCoverageMatrix() []map[string]any {
 		coverageRow("link", "supported", "timeline/search", "title, url, source, description/thumb when present", "raw appmsg XML"),
 		coverageRow("quote", "supported", "timeline/context", "reply text plus referenced message summary/payload", "nested refermsg XML and parsed fields"),
 		coverageRow("forward_chat", "supported_with_diagnostics", "timeline/media", "recursive forward items, text/link/file/image refs when resolvable", "source ids, nested raw items, unresolved media warnings"),
+		coverageRow("note", "supported_with_diagnostics", "timeline/media", "WeChat note (笔记): title plus its text/link/file/image items", "raw recordinfo items, unresolved media warnings"),
 		coverageRow("location", "supported", "timeline/search", "label/poi/lat/lon/scale", "raw location XML"),
 		coverageRow("transfer", "supported", "timeline/transfers", "amount, description, payer/receiver, message id", "pay XML/native fields"),
 		coverageRow("red_packet", "supported", "timeline/red-packets", "wishing, scene text, sender/session ids", "native URL/raw XML"),

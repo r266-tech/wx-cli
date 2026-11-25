@@ -1190,13 +1190,12 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		rows, page.HasMore = sliceRowsWithHasMore(rows, offset, limit)
 	}
 	s.attachMessageDisplayNames(rows)
-	if selfWxid := s.selfWxid(); selfWxid != "" {
-		for _, r := range rows {
-			sw, _ := r["sender_wxid"].(string)
-			if sw != "" {
-				r["is_from_me"] = (sw == selfWxid)
-			}
+	selfWxid := s.selfWxid()
+	for _, r := range rows {
+		if sw, _ := r["sender_wxid"].(string); sw != "" && selfWxid != "" {
+			r["is_from_me"] = (sw == selfWxid)
 		}
+		markMessageMentions(r, selfWxid)
 	}
 	for _, r := range rows {
 		if sid := rowInt64(r, "server_id"); sid != 0 {
@@ -1287,7 +1286,7 @@ func liteMessages(rows []wcdb.Row, mode string, includeDebugOpt ...bool) []wcdb.
 		"sender_group_nickname": true, "sender_contact_display": true, "is_from_me": true,
 		"base_kind": true, "kind_name": true, "content_summary": true,
 		"id": true, "display": true, "images": true, "videos": true, "files": true,
-		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "quote": true,
+		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "note": true, "quote": true,
 		"transfer": true, "red_packet": true, "location": true, "card": true,
 		"voice": true, "video": true, "sticker": true, "solitaire": true, "announcement": true, "pat": true,
 		"warnings": true,
@@ -1329,7 +1328,7 @@ func attachDisplayReadyFields(r wcdb.Row) {
 	if quote, ok := msg["quote"]; ok {
 		r["quote"] = quote
 	}
-	for _, key := range []string{"link", "music", "miniprogram", "forward_chat", "transfer", "red_packet", "location", "card", "voice", "video", "sticker", "solitaire", "announcement", "pat"} {
+	for _, key := range []string{"link", "music", "miniprogram", "forward_chat", "note", "transfer", "red_packet", "location", "card", "voice", "video", "sticker", "solitaire", "announcement", "pat"} {
 		if v, ok := msg[key]; ok {
 			r[key] = v
 		}
@@ -1387,6 +1386,11 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 		"text":        agentMessageText(r),
 	}
 	addOptionalGroupIdentity(out, r)
+	for _, k := range []string{"mentions_me", "mentions_all"} {
+		if v, _ := r[k].(bool); v {
+			out[k] = true
+		}
+	}
 	if warnings := agentMessageWarnings(r); len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
@@ -1668,6 +1672,9 @@ func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 	refSender := firstNonEmpty(stringMapValue(refer, "displayname"), stringMapValue(refer, "fromusr"))
 	if stringMapValue(refer, "displayname") == "" && stringMapValue(refer, "fromusr") == rowString(r, "sender_wxid") {
 		refSender = agentMessageSender(r)
+	} else if looksLikeRawChatID(refSender) && refSender == rowString(r, "talker") && rowString(r, "talker_display_name") != "" {
+		// In a private chat the quoted person is the chat itself.
+		refSender = rowString(r, "talker_display_name")
 	}
 	quote := map[string]any{
 		"sender": refSender,
@@ -1786,6 +1793,12 @@ func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row, sourceIndexOp
 		if forward := agentForwardChatPayload(r, sourceIndex); len(forward) > 0 {
 			out["forward_chat"] = forward
 		}
+	case "note":
+		// A WeChat note (笔记) uses the same recordinfo item list as a
+		// forwarded chat history.
+		if note := agentForwardChatPayload(r, sourceIndex); len(note) > 0 {
+			out["note"] = note
+		}
 	case "transfer":
 		if transfer := agentTransferPayload(r); len(transfer) > 0 {
 			out["transfer"] = transfer
@@ -1839,7 +1852,7 @@ func attachAgentVisiblePayloadFromSource(out map[string]any, src wcdb.Row) {
 	}
 	srcMsg := agentMessageWithIndex(src, nil)
 	for _, key := range []string{
-		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat",
+		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat", "note",
 		"transfer", "red_packet", "location", "card", "voice", "video", "sticker",
 		"solitaire", "announcement", "pat",
 	} {
@@ -2508,7 +2521,39 @@ func agentSimplePayload(r wcdb.Row, kind string) map[string]any {
 
 func agentImageRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
 	paths, warnings := agentImagePaths(r, referenced)
-	return agentMediaRefsFromPaths(r, paths, referenced, "image"), warnings
+	refs := agentMediaRefsFromPaths(r, paths, referenced, "image")
+	if len(refs) == 0 {
+		return refs, warnings
+	}
+	for _, ref := range refs {
+		if agentImagePathVariantRank(stringMapValue(ref, "path")) != 0 {
+			return refs, warnings
+		}
+	}
+	// Only a thumbnail is readable: say so, so the agent does not mistake a
+	// small preview for the picture, and say how to get the original.
+	for _, ref := range refs {
+		ref["thumbnail"] = true
+	}
+	warnings = appendUniqueStrings(warnings, "image_thumbnail_only")
+	if agentImageOriginalNeedsFFmpeg(r, referenced) {
+		warnings = appendUniqueStrings(warnings, "image_original_needs_ffmpeg")
+	}
+	return refs, warnings
+}
+
+func agentImageOriginalNeedsFFmpeg(r wcdb.Row, referenced bool) bool {
+	for _, h := range mapSliceAny(r["media_read_hints"]) {
+		if !agentHintMatchesReferenced(h, referenced) || !agentHintIsImage(h) {
+			continue
+		}
+		for _, d := range mapSliceAny(h["local_path_details"]) {
+			if rowString(wcdb.Row(d), "decode_status") == "needs_ffmpeg" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func agentVideoRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
@@ -2554,6 +2599,14 @@ func agentVoicePayload(r wcdb.Row) map[string]any {
 	if len(transcript) == 0 && len(warnings) == 0 {
 		transcript, warnings = agentVoiceTranscript(r, true)
 	}
+	// Tell the agent the fix when transcription is simply not installed;
+	// `asr setup` needs no user input.
+	for _, w := range warnings {
+		if w == "voice_transcription_unavailable" && !localVoiceASRReady() {
+			warnings = appendUniqueStrings(warnings, "voice_asr_not_installed")
+			break
+		}
+	}
 	if len(transcript) > 0 {
 		out["transcript"] = transcript
 	}
@@ -2561,6 +2614,19 @@ func agentVoicePayload(r wcdb.Row) map[string]any {
 		out["warnings"] = warnings
 	}
 	return out
+}
+
+var (
+	voiceASRReadyOnce sync.Once
+	voiceASRReady     bool
+)
+
+// localVoiceASRReady is checked once per process (about 20 ms).
+func localVoiceASRReady() bool {
+	voiceASRReadyOnce.Do(func() {
+		voiceASRReady = asrReadyBool(asrStatusData()["wechat_voice_ready"])
+	})
+	return voiceASRReady
 }
 
 func agentVoiceRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
@@ -2879,6 +2945,9 @@ func firstNonZeroInt64(vals ...int64) int64 {
 	return 0
 }
 
+// WeChat saves a re-downloaded file as "name(2).ext" next to "name.ext".
+var wechatDuplicateSuffix = regexp.MustCompile(`\(\d+\)(\.[^.()]*)?$`)
+
 func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
 	if len(refs) <= 1 {
 		return refs
@@ -2887,7 +2956,7 @@ func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
 	seen := map[string]bool{}
 	for _, ref := range refs {
 		if ref["name"] != nil || ref["file_size"] != nil {
-			key := fmt.Sprintf("%v\x00%v", ref["name"], ref["file_size"])
+			key := fmt.Sprintf("%v\x00%v", wechatDuplicateSuffix.ReplaceAllString(fmt.Sprint(ref["name"]), "$1"), ref["file_size"])
 			if seen[key] {
 				continue
 			}
@@ -3239,7 +3308,7 @@ func messageMayHaveMedia(baseKind int64, kindName string) bool {
 		return true
 	}
 	switch strings.TrimSpace(strings.ToLower(kindName)) {
-	case "image", "voice", "video", "file", "sticker", "forward_chat", "miniprogram", "channel_video":
+	case "image", "voice", "video", "file", "sticker", "forward_chat", "note", "miniprogram", "channel_video":
 		return true
 	default:
 		return false
@@ -4087,32 +4156,52 @@ func (s *server) decodeLocalImageForAgent(path string, siblingPaths []string) ma
 	if strings.ToLower(filepath.Ext(path)) != ".dat" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return map[string]any{
-			"decode_status": "decode_failed",
-			"decode_error":  err.Error(),
-		}
-	}
-	decoded, ext, meta, status, err := s.decodeWechatImageDAT(data, siblingPaths)
 	out := map[string]any{}
-	for k, v := range meta {
-		out[k] = v
-	}
-	if err != nil {
-		out["decode_status"] = status
-		out["decode_error"] = err.Error()
-		return out
-	}
-	decodedPath, err := s.writeDecodedMediaCache(path, decoded, ext)
-	if err != nil {
-		if strings.Contains(err.Error(), "strict_read_only") {
-			out["decode_status"] = "strict_read_only"
-		} else {
-			out["decode_status"] = "decode_failed"
+	var decoded []byte
+	var decodedPath string
+	// A WXGF original is converted by ffmpeg; reuse the result keyed by the
+	// source file so a read does not spawn ffmpeg per image every time.
+	convertedPath := s.wxgfConversionCachePath(path)
+	if convertedPath != "" {
+		if b, err := os.ReadFile(convertedPath); err == nil && imageExtForData(b) == "jpg" {
+			decoded, decodedPath = b, convertedPath
+			out["source_format"] = "wxgf"
+			out["converter"] = "ffmpeg"
 		}
-		out["decode_error"] = err.Error()
-		return out
+	}
+	if decodedPath == "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return map[string]any{
+				"decode_status": "decode_failed",
+				"decode_error":  err.Error(),
+			}
+		}
+		var ext, status string
+		var meta map[string]any
+		decoded, ext, meta, status, err = s.decodeWechatImageDAT(data, siblingPaths)
+		for k, v := range meta {
+			out[k] = v
+		}
+		if err != nil {
+			out["decode_status"] = status
+			out["decode_error"] = err.Error()
+			return out
+		}
+		if meta["source_format"] == "wxgf" && convertedPath != "" {
+			decodedPath, err = writeMediaCacheFile(convertedPath, decoded)
+		} else {
+			decodedPath, err = s.writeDecodedMediaCache(path, decoded, ext)
+		}
+		if err != nil {
+			if strings.Contains(err.Error(), "strict_read_only") {
+				out["decode_status"] = "strict_read_only"
+			} else {
+				out["decode_status"] = "decode_failed"
+			}
+			out["decode_error"] = err.Error()
+			return out
+		}
 	}
 	out["decode_status"] = "decoded"
 	out["decoded_path"] = decodedPath
@@ -4191,7 +4280,7 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 	if lastErr == nil {
 		meta["v4_key_source"] = source
 		if ext == "wxgf" {
-			return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+			return finishWXGF(decoded, meta)
 		}
 		return decoded, ext, meta, "decoded", nil
 	}
@@ -4201,7 +4290,7 @@ func (s *server) decodeWechatV4ImageDAT(data []byte, siblingPaths []string) ([]b
 		if lastErr == nil {
 			meta["v4_key_source"] = source
 			if ext == "wxgf" {
-				return nil, "", meta, "unsupported_format", fmt.Errorf("decoded WXGF image needs a converter before agent-visible output")
+				return finishWXGF(decoded, meta)
 			}
 			return decoded, ext, meta, "decoded", nil
 		}
@@ -4477,6 +4566,41 @@ func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string)
 		return "", fmt.Errorf("strict_read_only: decoded media cache write is disabled")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := atomicPrivateWrite(dst, data); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+// wxgfConversionCachePath names the converted JPEG after the source file's
+// path, size and mtime, so a changed source is converted again.
+func (s *server) wxgfConversionCachePath(srcPath string) string {
+	st, err := os.Stat(srcPath)
+	if err != nil || st.IsDir() {
+		return ""
+	}
+	dir, err := s.mediaDecodeCacheDir()
+	if err != nil {
+		return ""
+	}
+	base := safeCacheID(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
+	if base == "" {
+		base = "media"
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("wxgf|%s|%d|%d", srcPath, st.Size(), st.ModTime().UnixNano())))
+	return filepath.Join(dir, fmt.Sprintf("%s-%s.jpg", base, hex.EncodeToString(sum[:8])))
+}
+
+func writeMediaCacheFile(dst string, data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("decoded media is empty")
+	}
+	if strictReadOnlyMode() {
+		return "", fmt.Errorf("strict_read_only: decoded media cache write is disabled")
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
 	if err := atomicPrivateWrite(dst, data); err != nil {
@@ -5938,7 +6062,9 @@ func mediaKindWhere(kind, alias string) (string, []any, error) {
 	case "app":
 		return "(" + col + " & 4294967295) = ?", []any{int64(49)}, nil
 	case "file":
-		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8), packedLocalType(49, 24)}, nil
+		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
+	case "note":
+		return col + " = ?", []any{packedLocalType(49, 24)}, nil
 	case "forward_chat":
 		return col + " = ?", []any{packedLocalType(49, 19)}, nil
 	case "miniprogram":
@@ -5979,7 +6105,9 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 	case "link":
 		return col + " IN (?, ?)", []any{packedLocalType(49, 5), packedLocalType(49, 49)}, nil
 	case "file":
-		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8), packedLocalType(49, 24)}, nil
+		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
+	case "note":
+		return col + " = ?", []any{packedLocalType(49, 24)}, nil
 	case "forward_chat":
 		return col + " = ?", []any{packedLocalType(49, 19)}, nil
 	case "miniprogram":
@@ -8434,7 +8562,7 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 				"nativeurl":     m.AppMsg.WcPayInfo.NativeURL,
 			})
 		}
-		if subtype == 19 {
+		if subtype == 19 || subtype == 24 {
 			items, err := wxparse.ForwardItems(raw, depth)
 			if err != nil {
 				out["forward_items_parse_error"] = err.Error()
@@ -8559,6 +8687,13 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt .
 			return firstNonEmpty(stringMapValue(p, "des"), stringMapValue(wcpay, "description"), stringMapValue(wcpay, "feedesc"), "[转账]")
 		case 2001:
 			return firstNonEmpty(stringMapValue(wcpay, "sendertitle"), title, "[红包]")
+		}
+		if subtype == 24 {
+			line := strings.TrimSpace(strings.SplitN(firstNonEmpty(title, stringMapValue(p, "des")), "\n", 2)[0])
+			if line == "" {
+				return "[笔记]"
+			}
+			return "[笔记] " + truncateRunes(line, 60)
 		}
 		if subtype == 57 {
 			quoted := "..."
