@@ -1286,7 +1286,7 @@ func liteMessages(rows []wcdb.Row, mode string, includeDebugOpt ...bool) []wcdb.
 		"sender_group_nickname": true, "sender_contact_display": true, "is_from_me": true,
 		"base_kind": true, "kind_name": true, "content_summary": true,
 		"id": true, "display": true, "images": true, "videos": true, "files": true,
-		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "quote": true,
+		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "note": true, "quote": true,
 		"transfer": true, "red_packet": true, "location": true, "card": true,
 		"voice": true, "video": true, "sticker": true, "solitaire": true, "announcement": true, "pat": true,
 		"warnings": true,
@@ -1328,7 +1328,7 @@ func attachDisplayReadyFields(r wcdb.Row) {
 	if quote, ok := msg["quote"]; ok {
 		r["quote"] = quote
 	}
-	for _, key := range []string{"link", "music", "miniprogram", "forward_chat", "transfer", "red_packet", "location", "card", "voice", "video", "sticker", "solitaire", "announcement", "pat"} {
+	for _, key := range []string{"link", "music", "miniprogram", "forward_chat", "note", "transfer", "red_packet", "location", "card", "voice", "video", "sticker", "solitaire", "announcement", "pat"} {
 		if v, ok := msg[key]; ok {
 			r[key] = v
 		}
@@ -1790,6 +1790,12 @@ func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row, sourceIndexOp
 		if forward := agentForwardChatPayload(r, sourceIndex); len(forward) > 0 {
 			out["forward_chat"] = forward
 		}
+	case "note":
+		// A WeChat note (笔记) uses the same recordinfo item list as a
+		// forwarded chat history.
+		if note := agentForwardChatPayload(r, sourceIndex); len(note) > 0 {
+			out["note"] = note
+		}
 	case "transfer":
 		if transfer := agentTransferPayload(r); len(transfer) > 0 {
 			out["transfer"] = transfer
@@ -1843,7 +1849,7 @@ func attachAgentVisiblePayloadFromSource(out map[string]any, src wcdb.Row) {
 	}
 	srcMsg := agentMessageWithIndex(src, nil)
 	for _, key := range []string{
-		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat",
+		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat", "note",
 		"transfer", "red_packet", "location", "card", "voice", "video", "sticker",
 		"solitaire", "announcement", "pat",
 	} {
@@ -2590,6 +2596,14 @@ func agentVoicePayload(r wcdb.Row) map[string]any {
 	if len(transcript) == 0 && len(warnings) == 0 {
 		transcript, warnings = agentVoiceTranscript(r, true)
 	}
+	// Tell the agent the fix when transcription is simply not installed;
+	// `asr setup` needs no user input.
+	for _, w := range warnings {
+		if w == "voice_transcription_unavailable" && !localVoiceASRReady() {
+			warnings = appendUniqueStrings(warnings, "voice_asr_not_installed")
+			break
+		}
+	}
 	if len(transcript) > 0 {
 		out["transcript"] = transcript
 	}
@@ -2597,6 +2611,19 @@ func agentVoicePayload(r wcdb.Row) map[string]any {
 		out["warnings"] = warnings
 	}
 	return out
+}
+
+var (
+	voiceASRReadyOnce sync.Once
+	voiceASRReady     bool
+)
+
+// localVoiceASRReady is checked once per process (about 20 ms).
+func localVoiceASRReady() bool {
+	voiceASRReadyOnce.Do(func() {
+		voiceASRReady = asrReadyBool(asrStatusData()["wechat_voice_ready"])
+	})
+	return voiceASRReady
 }
 
 func agentVoiceRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
@@ -2915,6 +2942,9 @@ func firstNonZeroInt64(vals ...int64) int64 {
 	return 0
 }
 
+// WeChat saves a re-downloaded file as "name(2).ext" next to "name.ext".
+var wechatDuplicateSuffix = regexp.MustCompile(`\(\d+\)(\.[^.()]*)?$`)
+
 func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
 	if len(refs) <= 1 {
 		return refs
@@ -2923,7 +2953,7 @@ func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
 	seen := map[string]bool{}
 	for _, ref := range refs {
 		if ref["name"] != nil || ref["file_size"] != nil {
-			key := fmt.Sprintf("%v\x00%v", ref["name"], ref["file_size"])
+			key := fmt.Sprintf("%v\x00%v", wechatDuplicateSuffix.ReplaceAllString(fmt.Sprint(ref["name"]), "$1"), ref["file_size"])
 			if seen[key] {
 				continue
 			}
@@ -3275,7 +3305,7 @@ func messageMayHaveMedia(baseKind int64, kindName string) bool {
 		return true
 	}
 	switch strings.TrimSpace(strings.ToLower(kindName)) {
-	case "image", "voice", "video", "file", "sticker", "forward_chat", "miniprogram", "channel_video":
+	case "image", "voice", "video", "file", "sticker", "forward_chat", "note", "miniprogram", "channel_video":
 		return true
 	default:
 		return false
@@ -6029,7 +6059,9 @@ func mediaKindWhere(kind, alias string) (string, []any, error) {
 	case "app":
 		return "(" + col + " & 4294967295) = ?", []any{int64(49)}, nil
 	case "file":
-		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8), packedLocalType(49, 24)}, nil
+		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
+	case "note":
+		return col + " = ?", []any{packedLocalType(49, 24)}, nil
 	case "forward_chat":
 		return col + " = ?", []any{packedLocalType(49, 19)}, nil
 	case "miniprogram":
@@ -6070,7 +6102,9 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 	case "link":
 		return col + " IN (?, ?)", []any{packedLocalType(49, 5), packedLocalType(49, 49)}, nil
 	case "file":
-		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8), packedLocalType(49, 24)}, nil
+		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
+	case "note":
+		return col + " = ?", []any{packedLocalType(49, 24)}, nil
 	case "forward_chat":
 		return col + " = ?", []any{packedLocalType(49, 19)}, nil
 	case "miniprogram":
@@ -8525,7 +8559,7 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 				"nativeurl":     m.AppMsg.WcPayInfo.NativeURL,
 			})
 		}
-		if subtype == 19 {
+		if subtype == 19 || subtype == 24 {
 			items, err := wxparse.ForwardItems(raw, depth)
 			if err != nil {
 				out["forward_items_parse_error"] = err.Error()
@@ -8650,6 +8684,13 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt .
 			return firstNonEmpty(stringMapValue(p, "des"), stringMapValue(wcpay, "description"), stringMapValue(wcpay, "feedesc"), "[转账]")
 		case 2001:
 			return firstNonEmpty(stringMapValue(wcpay, "sendertitle"), title, "[红包]")
+		}
+		if subtype == 24 {
+			line := strings.TrimSpace(strings.SplitN(firstNonEmpty(title, stringMapValue(p, "des")), "\n", 2)[0])
+			if line == "" {
+				return "[笔记]"
+			}
+			return "[笔记] " + truncateRunes(line, 60)
 		}
 		if subtype == 57 {
 			quoted := "..."

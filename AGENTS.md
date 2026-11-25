@@ -286,6 +286,9 @@ SILK, and duplicate candidate paths belong in `include_debug=true`,
 Image refs flagged `thumbnail: true` (warning `image_thumbnail_only`) are small
 previews, not the picture. Most WeChat 4.x originals are WXGF and need `ffmpeg`;
 on `image_original_needs_ffmpeg`, run `brew install ffmpeg` and read again.
+On `voice_asr_not_installed`, `wechat-cli asr setup` installs local voice
+transcription (no user input; downloads a speech model). A WeChat note (笔记)
+is `kind: note` with the same item list as `forward_chat`.
 
 Images/videos in agent view should expose directly readable local `path` values
 only. Voice rows are read from `media_0.db` / `VoiceInfo`; wechat-cli attempts

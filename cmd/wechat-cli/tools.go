@@ -561,7 +561,7 @@ var toolDefs = []toolDef{
 			"before":                strProp("可选: 截止时间"),
 			"sender":                strProp("可选: sender wxid/昵称; 可传 me/self 表示自己"),
 			"from_me":               boolProp("仅返回自己发出的媒体消息; 等价 sender=me"),
-			"type":                  strProp("可选: kind_name, 如 image/video/file/forward_chat/miniprogram"),
+			"type":                  strProp("可选: kind_name, 如 image/video/file/note/forward_chat/miniprogram"),
 			"kind_name":             strProp("可选: 同 type"),
 			"base_kind":             intProp("可选: base_kind raw int"),
 			"resource_family":       strProp("可选: image / video / file / cover / unknown"),
