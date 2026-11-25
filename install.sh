@@ -134,7 +134,7 @@ Environment:
   WXKEY_SRC                 Source checkout for wxkey when installing from source.
   WXKEY_BIN                 Existing wxkey binary to copy.
   WXKEY_GO_INSTALL          Go package/version for source fallback
-                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8).
+                            (default github.com/r266-tech/wxkey/cmd/wxkey@v1.4.9).
 EOF
 }
 
@@ -659,7 +659,7 @@ resolve_components() {
     WXKEY_SOURCE="$SOURCE_DIR/../wxkey/wxkey"
   elif have_cmd go; then
     WXKEY_MODE="go-install"
-    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.8}"
+    WXKEY_SOURCE="${WXKEY_GO_INSTALL:-github.com/r266-tech/wxkey/cmd/wxkey@v1.4.9}"
   elif have_cmd wxkey; then
     WXKEY_MODE="copy"
     WXKEY_SOURCE="$(command -v wxkey)"
@@ -1017,24 +1017,66 @@ sudo_keychain_account() {
   fi
 }
 
+# State removal has two levels. A reset (--clear-state) drops keys, config,
+# caches, logs and the shadow WeChat so the next bootstrap starts clean, but
+# keeps the stored sudo credential (the next bootstrap needs no password) and
+# the user's own digests/archives. A purge (--uninstall --purge-state) removes
+# all of it.
+RUNTIME_KEYCHAIN_SERVICE="com.r266.wechat-cli.runtime-keys.v1"
+SHADOW_DIR="$HOME/Library/Application Support/wx-mcp"
+
+purge_is_full() {
+  [[ "$MODE" == "uninstall" ]]
+}
+
 queue_purge_state_actions() {
   ACTIONS+=("remove wxkey config file $HOME/.config/wxcli/config.json")
   ACTIONS+=("remove empty wxkey config dir $HOME/.config/wxcli when no lib remains")
-  ACTIONS+=("remove wechat-cli state dir $HOME/.wechat-cli")
+  ACTIONS+=("delete wechat-cli runtime DB keys from Keychain ($RUNTIME_KEYCHAIN_SERVICE)")
+  ACTIONS+=("remove wxkey shadow WeChat and its cloned home under $SHADOW_DIR")
+  if purge_is_full; then
+    ACTIONS+=("remove wechat-cli state dir $HOME/.wechat-cli")
+    ACTIONS+=("delete wxkey sudo Keychain credential for account $(sudo_keychain_account)")
+  else
+    ACTIONS+=("remove wechat-cli state under $HOME/.wechat-cli except digests/ and archives/")
+    ACTIONS+=("keep wxkey sudo Keychain credential so the next bootstrap asks for no password")
+  fi
   ACTIONS+=("remove legacy wx-mcp state dir $HOME/.wx-mcp")
   ACTIONS+=("remove wechat-cli logs $LOG_DIR")
   ACTIONS+=("remove legacy wx-mcp logs $HOME/Library/Logs/wx-mcp")
-  ACTIONS+=("delete legacy wxkey sudo Keychain credential for account $(sudo_keychain_account)")
+}
+
+delete_runtime_keychain_items() {
+  [[ -x /usr/bin/security ]] || return 0
+  local i
+  # One item per WeChat account; delete every item of the service.
+  for i in {1..50}; do
+    /usr/bin/security delete-generic-password -s "$RUNTIME_KEYCHAIN_SERVICE" >/dev/null 2>&1 || break
+  done
 }
 
 run_purge_state() {
+  local entry
   rm -f "$HOME/.config/wxcli/config.json"
   rmdir "$HOME/.config/wxcli" 2>/dev/null || true
-  rm -rf "$HOME/.wechat-cli"
-  rm -rf "$HOME/.wx-mcp"
-  if [[ -x /usr/bin/security ]]; then
-    /usr/bin/security delete-generic-password -a "$(sudo_keychain_account)" -s "r266.wx-mcp.sudo" >/dev/null 2>&1 || true
+  delete_runtime_keychain_items
+  if [[ -d "$SHADOW_DIR" && ! -L "$SHADOW_DIR" ]]; then
+    rm -rf "$SHADOW_DIR"
   fi
+  if purge_is_full; then
+    rm -rf "$HOME/.wechat-cli"
+    if [[ -x /usr/bin/security ]]; then
+      /usr/bin/security delete-generic-password -a "$(sudo_keychain_account)" -s "r266.wx-mcp.sudo" >/dev/null 2>&1 || true
+    fi
+  elif [[ -d "$HOME/.wechat-cli" && ! -L "$HOME/.wechat-cli" ]]; then
+    for entry in "$HOME/.wechat-cli"/*(DN); do
+      case "${entry:t}" in
+        digests|archives) ;;
+        *) rm -rf "$entry" ;;
+      esac
+    done
+  fi
+  rm -rf "$HOME/.wx-mcp"
   rm -rf "$LOG_DIR"
   rm -rf "$HOME/Library/Logs/wx-mcp"
 }

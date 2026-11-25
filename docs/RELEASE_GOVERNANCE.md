@@ -21,7 +21,7 @@ source tag or asset name.
 
 ## Build inputs
 
-`release-dependencies.json` pins wxkey v1.4.8 by full commit and WCDB 2.1.16 by
+`release-dependencies.json` pins wxkey v1.4.9 by full commit and WCDB 2.1.16 by
 upstream release ZIP SHA256 and source commit. WCDB builds with CMake for arm64,
 macOS 12+, CommonCrypto and zstd disabled. Runtime message decompression remains
 in Go. The build reads no user's WeChat database and requires no sibling checkout.
@@ -102,7 +102,10 @@ An ad-hoc signed candidate has a different code identity from an older binary.
 macOS can therefore require authorization to read the existing runtime item.
 Normal commands remain noninteractive: `keychain status` reports
 `keychain_access_required` with `loaded=false`, without exposing the item.
-Run `wechat-cli keychain authorize --interactive` from the candidate installation
+The unattended recovery is `wxkey bootstrap`: the next read migrates the fresh
+keys into a Keychain item owned by the new binary (an item written by an older
+binary is replaced, not modified). Alternatively, run
+`wechat-cli keychain authorize --interactive` from the candidate installation
 and complete the native macOS dialog, then retry `keychain status` and acceptance.
 This command only reads the existing account item; it does not rewrite config,
 export secrets, migrate records, or change the access list itself. Strict

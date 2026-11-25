@@ -24,7 +24,7 @@ func (s *server) toolMessageContext(a map[string]any) (any, error) {
 		return nil, fmt.Errorf("talker or chat is required")
 	}
 	if aggregatorSessions[talker] {
-		return nil, fmt.Errorf("%q is an aggregator session; pass the concrete gh_*/wxid talker instead", talker)
+		return nil, fmt.Errorf("invalid_argument: %q is a folder session (chat_type=folded) with no messages of its own; pass the username of a real chat from sessions", talker)
 	}
 	ref, err := contextAnchorRefFromArgs(a)
 	if err != nil {

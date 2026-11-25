@@ -276,12 +276,17 @@ func TestUsableStaleMetadataCacheKeepsRuntimeReady(t *testing.T) {
 	}
 }
 
-func TestUnusableMetadataCacheStillDegradesRuntime(t *testing.T) {
+func TestUnusableMetadataCacheIsReportedWithoutDegradingLiveRuntime(t *testing.T) {
 	s, _ := liveSessionFixture(t)
-	// The fixture index has no source metadata, so it cannot be trusted.
+	// The fixture index has no source metadata, so it cannot be trusted. It is
+	// only a fallback for name resolution and stats and is rebuilt on demand,
+	// so while live reads work it is reported, not a degraded runtime.
 	status := s.readOSStatus(false)
 	cache, _ := status["metadata_cache"].(map[string]any)
-	if status["readiness"] != "degraded" || cache["degraded"] != true || cache["blocked_reason"] == nil {
-		t.Fatalf("unusable metadata index not reported as degraded: %#v", status)
+	if cache["degraded"] != true || cache["blocked_reason"] == nil || cache["refresh"] != "on_demand" {
+		t.Fatalf("unusable metadata index not reported: %#v", status)
+	}
+	if status["live_read_ok"] != true || status["readiness"] != "ready" || status["degraded_by"] != nil {
+		t.Fatalf("unusable fallback cache degraded a live-readable runtime: %#v", status)
 	}
 }

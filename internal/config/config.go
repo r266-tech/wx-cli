@@ -93,10 +93,12 @@ func LoadRuntimeKeyMetadata() (RuntimeKeyMetadata, error) {
 		return RuntimeKeyMetadata{}, err
 	}
 	store := "missing"
-	if c.KeyStore == "keychain" {
-		store = "keychain"
-	} else if len(c.Keys) > 0 {
+	// Plaintext keys in the file are the newest: wxkey writes them even into a
+	// Keychain-backed config (keeping key_store, dropping key_store_ref).
+	if len(c.Keys) > 0 {
 		store = "config_legacy"
+	} else if c.KeyStore == "keychain" {
+		store = "keychain"
 	}
 	return RuntimeKeyMetadata{Store: store, DBRoot: c.DBRoot, Wxid: c.Wxid}, nil
 }
@@ -235,7 +237,7 @@ func MigratePersistentToKeychain(backup func(*Config) error) (MigrationResult, e
 		if err := hydrateRuntimeKeys(cfg); err != nil {
 			return err
 		}
-		if cfg.KeyStore == "keychain" {
+		if cfg.KeyStore == "keychain" && len(raw.Keys) == 0 {
 			result = MigrationResult{KeyCount: len(cfg.Keys), Reference: cfg.KeyStoreRef}
 			if raw.ImageKey == "" && raw.ImageXORKey == nil {
 				return nil
@@ -693,7 +695,9 @@ func hydrateRuntimeKeys(c *Config) error {
 }
 
 func hydrateRuntimeKeysWith(c *Config, load func(string, string) (*keystore.Record, error)) error {
-	if c.KeyStore != "keychain" {
+	// Fresh plaintext keys from wxkey win over the Keychain copy until the
+	// next migration stores them there.
+	if c.KeyStore != "keychain" || len(c.Keys) > 0 {
 		return nil
 	}
 	if c.DBRoot == "" || c.Wxid == "" || c.KeyStoreRef != keystore.Account(c.DBRoot, c.Wxid) {

@@ -219,6 +219,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 	wcdbAvailable := false
 	var warnings []string
 	var degradedBy []string
+	metadataCacheDegraded := false
 	blockedBy := ""
 	nextAction := ""
 	var suggestedCommands []string
@@ -289,11 +290,11 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 							} else {
 								cache["blocked_reason"] = metadataStatusReason(reason)
 								cache["degraded"] = true
-								degradedBy = appendUniqueStrings(degradedBy, "metadata_cache_degraded")
-								warnings = appendUniqueStrings(warnings, "metadata_cache_degraded")
-								if readiness == "ready" {
-									readiness = "degraded"
-								}
+								// The index is only a fallback for name resolution and
+								// stats and is rebuilt on demand; it degrades readiness
+								// only when live reads fail too (decided below).
+								cache["refresh"] = "on_demand"
+								metadataCacheDegraded = true
 							}
 						}
 					}
@@ -338,6 +339,13 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 	}
 	status["live_read_ok"] = liveReadOK
 	status["capabilities"] = readOSCapabilities(liveReadOK, wcdbAvailable, cacheIndexExists)
+	if metadataCacheDegraded && !liveReadOK && dbReady {
+		degradedBy = appendUniqueStrings(degradedBy, "metadata_cache_degraded")
+		warnings = appendUniqueStrings(warnings, "metadata_cache_degraded")
+		if readiness == "ready" {
+			readiness = "degraded"
+		}
+	}
 	if liveReadOK {
 		// Partial key coverage is common after WeChat updates. Name the
 		// databases that cannot be read instead of reporting full readiness.

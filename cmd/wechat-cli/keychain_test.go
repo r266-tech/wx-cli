@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/r266-tech/wx-cli/v2/internal/config"
 	"github.com/r266-tech/wx-cli/v2/internal/keystore"
 )
 
@@ -41,8 +42,16 @@ func TestKeychainDiagnosticKeepsKnownCauseAndRecovery(t *testing.T) {
 		}
 	}
 	advice := cliErrorAdvice("keychain_access_required", "", "chat_timeline", "timeline")
-	if len(advice.SuggestedCommands) == 0 || advice.SuggestedCommands[0] != appName+" keychain authorize --interactive" {
-		t.Fatal("recovery command missing")
+	// The unattended route comes first; the dialog route stays available.
+	if len(advice.SuggestedCommands) == 0 || advice.SuggestedCommands[0] != readOSBootstrapCommand() {
+		t.Fatal("unattended recovery command must come first")
+	}
+	hasDialog := false
+	for _, c := range advice.SuggestedCommands {
+		hasDialog = hasDialog || c == appName+" keychain authorize --interactive"
+	}
+	if !hasDialog {
+		t.Fatal("interactive recovery command missing")
 	}
 }
 
@@ -95,5 +104,36 @@ func TestKeychainMigrationBackupCleanupRemovesOnlyRegularBackups(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "linked-config.json")); err != nil {
 		t.Fatal("cleanup followed or removed a symlink")
+	}
+}
+
+func TestAutoMigrateLegacyKeysSkipsWhenNothingToDo(t *testing.T) {
+	t.Setenv("WECHAT_CLI_NO_KEYCHAIN_MIGRATE", "")
+	ready := &config.Config{Wxid: "wxid_a", DBRoot: "/x", Keys: map[string]string{"s": "k"}}
+	if autoMigrateLegacyKeys(nil) || autoMigrateLegacyKeys(&config.Config{}) {
+		t.Fatal("must not migrate without keys")
+	}
+	already := *ready
+	already.KeyStore = "keychain"
+	if autoMigrateLegacyKeys(&already) {
+		t.Fatal("must not migrate a Keychain-backed config")
+	}
+	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "1")
+	if autoMigrateLegacyKeys(ready) {
+		t.Fatal("strict read-only must not write the Keychain")
+	}
+}
+
+func TestToolErrorCodeReadsMachinePrefix(t *testing.T) {
+	for msg, want := range map[string]string{
+		"db_keys_missing: no schema-2 DB keys cached":    "db_keys_missing",
+		"invalid_argument: \"x\" is a folder session":    "invalid_argument",
+		"message_cursor_stale: original message is gone": "message_cursor_stale",
+		"table Msg_x not found in 8 message shards":      "tool_error",
+		"db_keys_missing without colon is not a code":    "tool_error",
+	} {
+		if got := toolErrorCode(errors.New(msg)); got != want {
+			t.Errorf("toolErrorCode(%q)=%q, want %q", msg, got, want)
+		}
 	}
 }

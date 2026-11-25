@@ -260,3 +260,43 @@ func TestMigrateStripsPlaintextImageKeyResidueOnlyWhenKeychainHoldsIt(t *testing
 		})
 	}
 }
+
+// wxkey rewrites a Keychain-backed config with fresh plaintext keys, keeping
+// key_store and dropping key_store_ref. Those keys must be used and migrated,
+// not shadowed by an unreadable or mismatched Keychain reference.
+func TestFreshPlaintextKeysInKeychainConfigAreUsedAndMigrated(t *testing.T) {
+	t.Setenv("WECHAT_CLI_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	oldLoad, oldSave := runtimeKeyLoad, runtimeKeySave
+	t.Cleanup(func() { runtimeKeyLoad, runtimeKeySave = oldLoad, oldSave })
+	var stored *keystore.Record
+	runtimeKeyLoad = func(string, string) (*keystore.Record, error) {
+		if stored == nil {
+			return nil, keystore.ErrInteractionRequired
+		}
+		return stored, nil
+	}
+	runtimeKeySave = func(r keystore.Record) error { stored = &r; return nil }
+	p, _ := Path()
+	written := map[string]any{"schema_version": 2, "wxid": "fixture", "db_root": "/fixture", "key_store": "keychain", "keys": map[string]string{"salt": "fresh"}, "key_epoch": 9}
+	b, _ := json.Marshal(written)
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if meta, err := LoadRuntimeKeyMetadata(); err != nil || meta.Store != "config_legacy" {
+		t.Fatalf("store=%+v err=%v, want config_legacy", meta, err)
+	}
+	loaded, err := Load()
+	if err != nil || loaded.Keys["salt"] != "fresh" {
+		t.Fatalf("fresh plaintext keys not used: %+v %v", loaded, err)
+	}
+	result, err := MigratePersistentToKeychain(func(*Config) error { return nil })
+	if err != nil || !result.Migrated || stored == nil || stored.Keys["salt"] != "fresh" {
+		t.Fatalf("migration result=%+v err=%v stored=%+v", result, err, stored)
+	}
+	after, _ := os.ReadFile(p)
+	var raw map[string]any
+	_ = json.Unmarshal(after, &raw)
+	if _, ok := raw["keys"]; ok || raw["key_store_ref"] != keystore.Account("/fixture", "fixture") {
+		t.Fatalf("config after migration: %v", raw)
+	}
+}
