@@ -60,6 +60,8 @@ type server struct {
 	keyRefreshLast            map[string]time.Time
 	imageKeyRefreshMu         sync.Mutex
 	imageKeyRefreshLast       time.Time
+	stickerKeysOnce           sync.Once
+	stickerKeys               [][]byte
 	readableImageIndexMu      sync.Mutex
 	readableImageIndexRoot    string
 	readableImageIndexBuiltAt time.Time
@@ -1322,7 +1324,7 @@ func liteMessages(rows []wcdb.Row, mode string, includeDebugOpt ...bool) []wcdb.
 		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "note": true, "quote": true,
 		"transfer": true, "red_packet": true, "location": true, "card": true,
 		"voice": true, "video": true, "sticker": true, "solitaire": true, "announcement": true, "pat": true,
-		"mail": true, "call": true, "channel_video": true, "channel_live": true, "gift": true,
+		"mail": true, "call": true, "channel_video": true, "channel_live": true, "gift": true, "channel_card": true, "channel_topic": true,
 		"warnings": true,
 	}
 	if includeDebug {
@@ -1464,7 +1466,12 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 	}
 	attachAgentStructuredPayloads(out, r, sourceIndex)
 	if warning := agentNotDownloadedWarning(r, out); warning != "" {
-		out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warning)
+		warnings := stringSliceAny(out["warnings"])
+		if warning == "image_original_not_downloaded" {
+			// Says more than image_thumbnail_only, which it implies.
+			warnings = removeString(warnings, "image_thumbnail_only")
+		}
+		out["warnings"] = appendUniqueStrings(warnings, warning)
 	}
 	if includeDebug {
 		if debug := agentDebugFields(r); len(debug) > 0 {
@@ -1931,7 +1938,7 @@ func attachAgentVisiblePayloadFromSource(out map[string]any, src wcdb.Row) {
 	for _, key := range []string{
 		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat", "note",
 		"transfer", "red_packet", "location", "card", "voice", "video", "sticker",
-		"solitaire", "announcement", "pat", "mail", "call", "channel_video", "channel_live", "gift",
+		"solitaire", "announcement", "pat", "mail", "call", "channel_video", "channel_live", "gift", "channel_card", "channel_topic",
 	} {
 		if key == "forward_chat" && rowString(src, "kind_name") == "forward_chat" && rowString(wcdb.Row(out), "kind") == "forward_chat" {
 			continue
@@ -2468,12 +2475,46 @@ func agentTransferPayload(r wcdb.Row) map[string]any {
 			amount, description, memo = a, d, m
 		}
 	}
+	if strings.Contains(description, "升级至最新版本") {
+		description = "" // WeChat's placeholder for old clients, wrong for the payer
+	}
 	return compactMap(map[string]any{
 		"amount":       amount,
+		"status":       transferStatus(wcpay["paysubtype"]),
 		"description":  description,
 		"memo":         memo,
 		"pay_sub_type": wcpay["paysubtype"],
 	})
+}
+
+// transferStatus names wcpayinfo.paysubtype: 1 is the transfer itself, 3
+// the payee accepting it, 4 it being returned.
+func transferStatus(v any) string {
+	switch fmt.Sprint(v) {
+	case "1":
+		return "sent"
+	case "3":
+		return "accepted"
+	case "4":
+		return "returned"
+	}
+	return ""
+}
+
+// transferSummary is what the chat shows. WeChat's own des says "收到转账"
+// for both sides plus an upgrade hint, so the line is built from the fields.
+func transferSummary(wcpay map[string]any) string {
+	label := map[string]string{"sent": "[转账]", "accepted": "[已收款]", "returned": "[已退还]"}[transferStatus(wcpay["paysubtype"])]
+	if label == "" {
+		label = "[转账]"
+	}
+	if amount := stringMapValue(wcpay, "feedesc"); amount != "" {
+		label += " " + amount
+	}
+	if memo := stringMapValue(wcpay, "pay_memo"); memo != "" {
+		label += "：" + memo
+	}
+	return label
 }
 
 func agentRedPacketPayload(r wcdb.Row) map[string]any {
@@ -4936,6 +4977,12 @@ func messageXMLMediaReadHints(s *server, r wcdb.Row) []map[string]any {
 			return []map[string]any{h}
 		}
 	case 49:
+		if rowInt64(r, "subtype") == 8 {
+			if h := emojiXMLReadHint(p); h != nil {
+				return []map[string]any{h}
+			}
+			return nil
+		}
 		if rowInt64(r, "subtype") == 57 {
 			return quoteXMLReadHints(s, r, p)
 		}
@@ -6280,11 +6327,11 @@ func mediaKindWhere(kind, alias string) (string, []any, error) {
 	case "video":
 		return col + " = ?", []any{int64(43)}, nil
 	case "sticker", "emoji":
-		return col + " = ?", []any{int64(47)}, nil
+		return col + " IN (?, ?)", []any{int64(47), packedLocalType(49, 8)}, nil
 	case "app":
 		return "(" + col + " & 4294967295) = ?", []any{int64(49)}, nil
 	case "file":
-		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
+		return col + " = ?", []any{packedLocalType(49, 6)}, nil
 	case "note":
 		return col + " = ?", []any{packedLocalType(49, 24)}, nil
 	case "forward_chat":
@@ -6316,10 +6363,14 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 		return col + " = ?", []any{packedLocalType(49, 63)}, nil
 	case "gift":
 		return col + " = ?", []any{packedLocalType(49, 124)}, nil
+	case "channel_card":
+		return col + " = ?", []any{packedLocalType(49, 50)}, nil
+	case "channel_topic":
+		return col + " = ?", []any{packedLocalType(49, 75)}, nil
 	case "video":
 		return "(" + col + " & 4294967295) = ?", []any{int64(43)}, nil
 	case "sticker", "emoji":
-		return "(" + col + " & 4294967295) = ?", []any{int64(47)}, nil
+		return "((" + col + " & 4294967295) = ? OR " + col + " = ?)", []any{int64(47), packedLocalType(49, 8)}, nil
 	case "location":
 		return "(" + col + " & 4294967295) = ?", []any{int64(48)}, nil
 	case "app":
@@ -6335,7 +6386,7 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 	case "location_share":
 		return col + " = ?", []any{packedLocalType(49, 17)}, nil
 	case "file":
-		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
+		return col + " = ?", []any{packedLocalType(49, 6)}, nil
 	case "note":
 		return col + " = ?", []any{packedLocalType(49, 24)}, nil
 	case "forward_chat":
@@ -7173,11 +7224,11 @@ func messageKindNameMatches(want, got string, baseKind int64) bool {
 	case "voice":
 		return baseKind == 34
 	case "card":
-		return baseKind == 42
+		return baseKind == 42 || baseKind == 66
 	case "video":
 		return baseKind == 43
 	case "sticker":
-		return baseKind == 47
+		return baseKind == 47 || got == "sticker"
 	case "location":
 		return baseKind == 48
 	case "voip":
@@ -7508,7 +7559,7 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 	rows, err := db.Query(fmt.Sprintf(`SELECT send_id,
 			sender_user_name AS sender_wxid,
 			session_name AS session_username,
-			native_url, message_server_id
+			message_server_id
 			FROM redEnvelopeTable %s
 			ORDER BY rowid DESC
 			LIMIT ? OFFSET ?`, wc), args...)
@@ -7556,6 +7607,24 @@ func (s *server) toolRedPackets(a map[string]any) (any, error) {
 			filtered = filtered[:limit]
 		}
 		rows = filtered
+	}
+	if !needsMessageMeta {
+		// When it was sent is the first thing an agent asks about a red packet.
+		meta := s.liveMessageMeta(rows, "message_server_id", "session_username")
+		for _, r := range rows {
+			if m, ok := meta[messagePairKey(rowString(r, "session_username"), rowInt64(r, "message_server_id"))]; ok {
+				if ct := rowInt64(m, "create_time"); ct > 0 {
+					r["create_time"] = ct
+					r["time_iso"] = cliFormatUnixISO(ct)
+				}
+			}
+		}
+	} else {
+		for _, r := range rows {
+			if ct := rowInt64(r, "create_time"); ct > 0 {
+				r["time_iso"] = cliFormatUnixISO(ct)
+			}
+		}
 	}
 	contents := s.fetchMessageContent(rows, "message_server_id", "session_username")
 	for _, r := range rows {
@@ -7621,16 +7690,29 @@ func (s *server) toolFavorites(a map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	includeRaw := getBool(a, "include_raw")
 	for _, r := range rows {
 		ti, _ := r["type_id"].(int64)
 		r["favorite_type"] = wxkind.FavKind(ti)
 		delete(r, "type_id")
 		if c, ok := r["content"].(string); ok && c != "" {
+			if title, text, entries, err := wxparse.FavoriteDetail(c); err == nil {
+				if title != "" {
+					r["title"] = title
+				}
+				if text != "" {
+					r["text"] = text
+				}
+				if items := favoriteItemMaps(entries); len(items) > 0 {
+					r["items"] = items
+					r["item_count"] = len(entries)
+				}
+			}
 			title, desc, url, perr := wxparse.FavoriteInfo(c)
 			if perr != nil {
 				r["parse_error"] = perr.Error()
 			} else if title != "" || desc != "" || url != "" {
-				if title != "" {
+				if title != "" && r["title"] == nil {
 					r["title"] = title
 				}
 				if desc != "" {
@@ -7645,6 +7727,9 @@ func (s *server) toolFavorites(a map[string]any) (any, error) {
 			if v, ok := r[k].(string); ok && v == "" {
 				delete(r, k)
 			}
+		}
+		if !includeRaw && r["parse_error"] == nil {
+			delete(r, "content") // the XML is CDN keys and md5s; items carry what it says
 		}
 	}
 	s.attachDisplayNames(rows,
@@ -8925,9 +9010,12 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt .
 		wcpay := mapAny(p["wcpayinfo"])
 		switch subtype {
 		case 2000:
-			return firstNonEmpty(stringMapValue(p, "des"), stringMapValue(wcpay, "description"), stringMapValue(wcpay, "feedesc"), "[转账]")
+			return transferSummary(wcpay)
 		case 2001:
-			return firstNonEmpty(stringMapValue(wcpay, "sendertitle"), title, "[红包]")
+			if wish := firstNonEmpty(stringMapValue(wcpay, "sendertitle"), title); wish != "" {
+				return "[红包] " + wish
+			}
+			return "[红包]"
 		}
 		if subtype == 24 {
 			line := strings.TrimSpace(strings.SplitN(firstNonEmpty(title, stringMapValue(p, "des")), "\n", 2)[0])
@@ -9139,4 +9227,38 @@ func (s *server) attachSnsAvatars(posts []*snsPost) {
 			p.AvatarURL = url
 		}
 	}
+}
+
+func removeString(values []string, drop string) []string {
+	out := values[:0:0]
+	for _, v := range values {
+		if v != drop {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+const favoriteItemsShown = 100
+
+func favoriteItemMaps(entries []wxparse.FavoriteEntry) []map[string]any {
+	var out []map[string]any
+	for i, e := range entries {
+		if i == favoriteItemsShown {
+			break
+		}
+		item := compactMap(map[string]any{
+			"type":   e.Type,
+			"title":  e.Title,
+			"text":   e.Text,
+			"sender": e.Sender,
+			"time":   e.Time,
+			"format": e.Format,
+		})
+		if e.Size > 0 && e.Type != "text" {
+			item["size"] = e.Size
+		}
+		out = append(out, item)
+	}
+	return out
 }

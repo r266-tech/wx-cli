@@ -729,7 +729,7 @@ var toolDefs = []toolDef{
 	{
 		Name: "red_packets",
 		Description: "微信红包记录. 字段: send_id / sender_wxid / sender_display_name / " +
-			"session_username / session_display_name / native_url (微信红包深链) / message_server_id / " +
+			"session_username / session_display_name / message_server_id / create_time / time_iso / " +
 			"wishing (祝福语 如 '恭喜发财大吉大利', 从 join XML 提取) / scene_text (如 '微信红包', omitempty). " +
 			"红包金额随机, 仅领取后可见, 不在本地数据中. " +
 			"不传 after/before 时按 rowid DESC (近似收到顺序); 传时间过滤时 live join 对应 Msg_<hash> 取 create_time.",
@@ -746,15 +746,17 @@ var toolDefs = []toolDef{
 	{
 		Name: "favorites",
 		Description: "微信收藏. 字段: server_id / favorite_type (text/image/voice/video/link/location/file/" +
-			"chat_history/miniprogram/unknown) / update_time / source_id (内部复合 ID) / " +
+			"chat_history/note/unknown) / update_time / source_id (内部复合 ID) / " +
 			"from_wxid / from_display_name / source_chat_username (omitempty) / source_chat_display_name / " +
-			"content (XML 原文) / title (从 XML 提取, omitempty) / description (omitempty) / url (omitempty). " +
+			"title / text (文字收藏正文) / description / url / items (收藏的聊天记录逐条或笔记各段: type/text/sender/time, 最多 100 条) / item_count (均 omitempty). " +
+			"XML 原文默认不返回, 需要时传 include_raw=true (字段 content). " +
 			"after/before 按 update_time 过滤, 接 unix秒 或 2006-01-02 (本地时区).",
 		InputSchema: jsonSchema(props{
-			"limit":  intProp("返回条数 (默认 50)"),
-			"offset": intPropBounds("跳过条数 (默认 0)", 0, 1000000),
-			"after":  strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
-			"before": strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"limit":       intProp("返回条数 (默认 50)"),
+			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),
+			"after":       strProp("起始时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"before":      strProp("截止时间 (unix秒 或 2006-01-02, 本地时区)"),
+			"include_raw": boolProp("同时返回收藏的 XML 原文 (默认 false)"),
 		}, nil),
 	},
 	{

@@ -291,3 +291,22 @@ func TestForwardItems_NestedMalformed(t *testing.T) {
 		t.Errorf("items[1].NestedItems should be nil on parse error, got %+v", items[1].NestedItems)
 	}
 }
+
+func TestFavoriteDetailItems(t *testing.T) {
+	chat := `<favitem type="14"><title>群聊的聊天记录</title><datalist count="2">` +
+		`<dataitem datatype="1" dataid="a"><datadesc>明天开会</datadesc><datasrcname>甲</datasrcname><datasrctime>2026-11-24 10:00</datasrctime></dataitem>` +
+		`<dataitem datatype="2" dataid="b"><cdn_dataurl>x</cdn_dataurl><fullsize>163543</fullsize><datasrcname>乙</datasrcname></dataitem>` +
+		`</datalist></favitem>`
+	title, text, entries, err := FavoriteDetail(chat)
+	if err != nil || title != "群聊的聊天记录" || text != "" || len(entries) != 2 {
+		t.Fatalf("title=%q text=%q entries=%+v err=%v", title, text, entries, err)
+	}
+	if entries[0].Type != "text" || entries[0].Text != "明天开会" || entries[0].Sender != "甲" || entries[1].Type != "image" || entries[1].Size != 163543 {
+		t.Fatalf("entries = %+v", entries)
+	}
+	note := `<favitem type="18"><datalist><dataitem datatype="8" htmlid="WeNoteHtmlFile"><datafmt>.htm</datafmt><datadesc>94.90KB</datadesc></dataitem>` +
+		`<dataitem datatype="1" htmlid="-1"><datadesc>第一段</datadesc></dataitem></datalist></favitem>`
+	if _, _, entries, _ := FavoriteDetail(note); len(entries) != 1 || entries[0].Text != "第一段" {
+		t.Fatalf("note entries = %+v", entries)
+	}
+}

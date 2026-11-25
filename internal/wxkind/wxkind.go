@@ -28,7 +28,7 @@ var AppSubtypeNames = map[int32]string{
 	4:    "link",
 	5:    "link",
 	6:    "file",
-	8:    "file",
+	8:    "sticker",
 	19:   "forward_chat",
 	24:   "note",
 	33:   "miniprogram",
@@ -43,6 +43,8 @@ var AppSubtypeNames = map[int32]string{
 	76:   "music",
 	87:   "announcement",
 	124:  "gift",
+	50:   "channel_card",
+	75:   "channel_topic",
 	2000: "transfer",
 	2001: "red_packet",
 }
@@ -59,7 +61,7 @@ var FavTypeNames = map[int64]string{
 	6:  "location",
 	8:  "file",
 	14: "chat_history",
-	18: "miniprogram",
+	18: "note",
 }
 
 // Resolve returns the most specific human-readable label for (baseKind, subtype).

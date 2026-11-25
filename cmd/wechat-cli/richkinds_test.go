@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"testing"
 
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
@@ -32,6 +34,10 @@ func TestRichKindsRenderWhatWeChatShows(t *testing.T) {
 			"announcement", "[群公告] 周五停电", "announcement"},
 		{"gift", packedLocalType(49, 124), `<msg><appmsg appid="" sdkver="0"><title>微信礼物</title><type>124</type><ecsgift><wishmessage><![CDATA[生日快乐]]></wishmessage><gifttitle><![CDATA[礼物]]></gifttitle><gifts><gift><skutitle><![CDATA[一束花]]></skutitle></gift></gifts></ecsgift></appmsg></msg>`,
 			"gift", "[微信礼物] 一束花：生日快乐", "gift"},
+		{"channel card", packedLocalType(49, 50), `<msg><appmsg appid="" sdkver="0"><title /><type>50</type><findernamecard><username>v2_x@finder</username><nickname>手作丁</nickname></findernamecard></appmsg></msg>`,
+			"channel_card", "[视频号名片] 手作丁", "channel_card"},
+		{"channel topic", packedLocalType(49, 75), `<msg><appmsg appid="" sdkver="0"><title>当前微信版本不支持展示该内容，请升级至最新版本。</title><type>75</type><finder><type>4</type><detail><finderTopic><topic><![CDATA[某首歌]]></topic><desc><![CDATA[9.6万次使用]]></desc><event><title><![CDATA[视频号 · 音乐]]></title></event></finderTopic></detail></finder></appmsg></msg>`,
+			"channel_topic", "[视频号 · 音乐] 某首歌（9.6万次使用）", "channel_topic"},
 		{"openim card", 66, `<?xml version="1.0"?><msg username="x@openim" nickname="企业联系人丙" />`,
 			"card", "[名片] 企业联系人丙", "card"},
 	}
@@ -51,7 +57,61 @@ func TestRichKindsRenderWhatWeChatShows(t *testing.T) {
 			t.Errorf("%s: placeholder link kept", c.name)
 		}
 	}
+	if wxkind.Resolve(49, 8) != "sticker" || wxkind.Resolve(49, 50) != "channel_card" {
+		t.Fatal("attachment sticker / channel card not named")
+	}
 	if wxkind.Resolve(49, 4) != "link" || wxkind.Resolve(49, 17) != "location_share" {
 		t.Fatal("new app subtypes not named")
+	}
+}
+
+func TestAttachmentStickerFeedsStickerPipeline(t *testing.T) {
+	sum := "cba76b9ab3830dfeb9bd841eddd6c9f9"
+	want := "http://wxapp.tc.qq.com/262/20304/stodownload?m=" + sum + "&filekey=1"
+	other := "http://wxapp.tc.qq.com/262/20304/stodownload?m=b9e3b1a5a75adaa4a06a1ed98b37440b&filekey=2"
+	field := func(num byte, v string) []byte {
+		b := []byte{num<<3 | 2}
+		b = binary.AppendUvarint(b, uint64(len(v)))
+		return append(b, v...)
+	}
+	pb := append(append(append(field(1, sum), field(2, want)...), field(5, other)...), 0x30, 0x01)
+	content := `<msg><appmsg appid="" sdkver="0"><title /><type>8</type><appattach><totallen>1641978</totallen><emoticonmd5>` + sum +
+		`</emoticonmd5><fileext>pic</fileext><cdnthumbwidth>300</cdnthumbwidth><cdnthumbheight>263</cdnthumbheight><emojiinfo>` +
+		base64.StdEncoding.EncodeToString(pb) + `</emojiinfo></appattach></appmsg></msg>`
+	row := richRow(packedLocalType(49, 8), content)
+	if row["kind_name"] != "sticker" {
+		t.Fatalf("kind = %v", row["kind_name"])
+	}
+	p, _ := row["message_content_parsed"].(map[string]any)
+	if stringMapValue(p, "md5") != sum || stringMapValue(p, "cdn_url") != want {
+		t.Fatalf("parsed = %#v", p)
+	}
+	if msg := agentMessage(row); msg["text"] != "[表情]" {
+		t.Fatalf("text = %v", msg["text"])
+	}
+	if emojiInfoURL("!!", sum) != "" {
+		t.Fatal("bad base64 must yield no URL")
+	}
+}
+
+func TestTransferAndRedPacketLines(t *testing.T) {
+	transfer := func(sub, memo string) string {
+		return `<msg><appmsg appid="" sdkver=""><title>微信转账</title><des>收到转账25.70元。如需收钱，请点此升级至最新版本</des><type>2000</type><wcpayinfo><paysubtype>` + sub +
+			`</paysubtype><feedesc>￥25.70</feedesc><pay_memo>` + memo + `</pay_memo></wcpayinfo></appmsg></msg>`
+	}
+	for _, c := range []struct{ sub, memo, text, status string }{
+		{"1", "饭钱", "[转账] ￥25.70：饭钱", "sent"},
+		{"3", "", "[已收款] ￥25.70", "accepted"},
+		{"4", "", "[已退还] ￥25.70", "returned"},
+	} {
+		msg := agentMessage(richRow(packedLocalType(49, 2000), transfer(c.sub, c.memo)))
+		tr := mapAny(msg["transfer"])
+		if msg["text"] != c.text || tr["status"] != c.status || tr["description"] != nil {
+			t.Errorf("paysubtype %s: text %q transfer %v", c.sub, msg["text"], tr)
+		}
+	}
+	red := `<msg><appmsg appid="" sdkver=""><title>恭喜发财，大吉大利</title><type>2001</type><wcpayinfo><sendertitle>恭喜发财，大吉大利</sendertitle><scenetext>微信红包</scenetext></wcpayinfo></appmsg></msg>`
+	if msg := agentMessage(richRow(packedLocalType(49, 2001), red)); msg["text"] != "[红包] 恭喜发财，大吉大利" {
+		t.Errorf("red packet text %q", msg["text"])
 	}
 }
