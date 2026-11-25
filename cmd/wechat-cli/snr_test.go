@@ -54,3 +54,28 @@ func TestSystemTextWxidsBecomeNames(t *testing.T) {
 		t.Fatalf("got %q / %q / %q", rows[0]["content_summary"], rows[1]["content_summary"], rows[2]["content_summary"])
 	}
 }
+
+func TestNotDownloadedWarnings(t *testing.T) {
+	hint := func(paths ...string) []any {
+		var details []any
+		for _, p := range paths {
+			details = append(details, map[string]any{"path": p})
+		}
+		return []any{map[string]any{"resource_family": "image", "local_path_details": details}}
+	}
+	thumbOnly := wcdb.Row{"kind_name": "image", "media_read_hints": hint("/x/abc_t.dat")}
+	if w := agentNotDownloadedWarning(thumbOnly, map[string]any{}); w != "image_original_not_downloaded" {
+		t.Fatalf("thumb-only image: %q", w)
+	}
+	hd := wcdb.Row{"kind_name": "image", "media_read_hints": hint("/x/abc_t.dat", "/x/abc_h.dat")}
+	if w := agentNotDownloadedWarning(hd, map[string]any{}); w != "" {
+		t.Fatalf("HD original present: %q", w)
+	}
+	if w := agentNotDownloadedWarning(wcdb.Row{"kind_name": "image"}, map[string]any{}); w != "" {
+		t.Fatalf("no media lookup must not claim anything: %q", w)
+	}
+	video := wcdb.Row{"kind_name": "video", "media_read_hints": []any{}}
+	if w := agentNotDownloadedWarning(video, map[string]any{}); w != "video_not_downloaded" {
+		t.Fatalf("video: %q", w)
+	}
+}

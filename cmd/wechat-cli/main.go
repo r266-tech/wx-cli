@@ -1289,6 +1289,7 @@ func liteMessages(rows []wcdb.Row, mode string, includeDebugOpt ...bool) []wcdb.
 		"link": true, "music": true, "miniprogram": true, "forward_chat": true, "note": true, "quote": true,
 		"transfer": true, "red_packet": true, "location": true, "card": true,
 		"voice": true, "video": true, "sticker": true, "solitaire": true, "announcement": true, "pat": true,
+		"mail": true, "call": true, "channel_video": true, "channel_live": true, "gift": true,
 		"warnings": true,
 	}
 	if includeDebug {
@@ -1394,6 +1395,13 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 	if warnings := agentMessageWarnings(r); len(warnings) > 0 {
 		out["warnings"] = warnings
 	}
+	if rowString(r, "kind_name") == "sticker" && r[stickerImagePathField] != nil {
+		images, _ := agentStickerImages(r)
+		out["images"] = images
+	} else if rowString(r, "kind_name") == "sticker" && r["media_read_hints"] != nil {
+		_, warnings := agentStickerImages(r)
+		out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warnings...)
+	}
 	if images, warnings := agentImageRefs(r, false); len(images) > 0 || len(warnings) > 0 {
 		if len(images) > 0 {
 			out["images"] = images
@@ -1422,12 +1430,56 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 		out["quote"] = quote
 	}
 	attachAgentStructuredPayloads(out, r, sourceIndex)
+	if warning := agentNotDownloadedWarning(r, out); warning != "" {
+		out["warnings"] = appendUniqueStrings(stringSliceAny(out["warnings"]), warning)
+	}
 	if includeDebug {
 		if debug := agentDebugFields(r); len(debug) > 0 {
 			out["debug"] = debug
 		}
 	}
 	return compactMap(out)
+}
+
+// agentNotDownloadedWarning says when WeChat itself has not downloaded the
+// media yet (it fetches originals only when opened), so the agent knows the
+// gap is not a decode failure. Only claimed after media lookup ran.
+func agentNotDownloadedWarning(r wcdb.Row, out map[string]any) string {
+	if r["media_read_hints"] == nil {
+		return ""
+	}
+	switch rowString(r, "kind_name") {
+	case "image":
+		if !agentImageHasOriginalCandidate(r) {
+			return "image_original_not_downloaded"
+		}
+	case "video":
+		if out["videos"] == nil {
+			return "video_not_downloaded"
+		}
+	case "file":
+		for _, f := range mapSliceAny(out["files"]) {
+			if stringMapValue(f, "path") != "" {
+				return ""
+			}
+		}
+		return "file_not_downloaded"
+	}
+	return ""
+}
+
+func agentImageHasOriginalCandidate(r wcdb.Row) bool {
+	for _, h := range mapSliceAny(r["media_read_hints"]) {
+		if !agentHintIsImage(h) {
+			continue
+		}
+		for _, d := range mapSliceAny(h["local_path_details"]) {
+			if path := stringMapValue(d, "path"); path != "" && agentImagePathVariantRank(path) != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func agentSourceMessageIndex(rows []wcdb.Row) map[string]wcdb.Row {
@@ -1831,6 +1883,11 @@ func attachAgentStructuredPayloads(out map[string]any, r wcdb.Row, sourceIndexOp
 			out["app"] = app
 		}
 	}
+	agentRichPayload(out, r)
+	if out["channel_video"] != nil || out["channel_live"] != nil {
+		// The appmsg shell of a Channels share is a "please upgrade" stub.
+		delete(out, "link")
+	}
 }
 
 func attachAgentVisiblePayloadFromSource(out map[string]any, src wcdb.Row) {
@@ -1841,7 +1898,7 @@ func attachAgentVisiblePayloadFromSource(out map[string]any, src wcdb.Row) {
 	for _, key := range []string{
 		"images", "videos", "files", "link", "music", "miniprogram", "forward_chat", "note",
 		"transfer", "red_packet", "location", "card", "voice", "video", "sticker",
-		"solitaire", "announcement", "pat",
+		"solitaire", "announcement", "pat", "mail", "call", "channel_video", "channel_live", "gift",
 	} {
 		if key == "forward_chat" && rowString(src, "kind_name") == "forward_chat" && rowString(wcdb.Row(out), "kind") == "forward_chat" {
 			continue
@@ -2699,6 +2756,8 @@ func agentVoiceTranscript(r wcdb.Row, referenced bool) (map[string]any, []string
 			warnings = appendUniqueStrings(warnings, "voice_transcription_no_speech")
 		case "failed":
 			warnings = appendUniqueStrings(warnings, "voice_transcription_failed")
+		case "pending":
+			warnings = appendUniqueStrings(warnings, "voice_transcription_pending")
 		default:
 			warnings = appendUniqueStrings(warnings, "voice_transcription_unavailable")
 		}
@@ -3222,6 +3281,8 @@ func (s *server) enrichMessageMediaResources(rows []wcdb.Row) error {
 	if len(rows) == 0 {
 		return nil
 	}
+	// Stickers come from the CDN, not the resource index; run last.
+	defer s.attachStickerImages(rows)
 	// XML and VoiceInfo hints are independent of the resource index. Preserve
 	// that enrichment even when the optional resource database cannot be read.
 	defer s.attachMediaReadHintsToMessages(rows)
@@ -5039,8 +5100,11 @@ func (s *server) voiceTranscriptForAgent(audioPath string) map[string]any {
 		return nil
 	}
 	cachePath := strings.TrimSuffix(audioPath, filepath.Ext(audioPath)) + ".transcript.json"
-	if cached := readVoiceTranscriptCache(cachePath); voiceTranscriptCacheUsable(cached) {
+	if cached := readVoiceTranscriptCache(cachePath); voiceTranscriptCacheUsable(cached) || recentVoiceTranscriptFailure(cachePath, cached) {
 		return cached
+	}
+	if !voiceTranscriptionBudgetLeft() {
+		return map[string]any{"status": "pending"}
 	}
 	if strictReadOnlyMode() {
 		return compactMap(map[string]any{
@@ -5076,6 +5140,46 @@ func (s *server) voiceTranscriptForAgent(audioPath string) map[string]any {
 }
 
 const voiceTranscriptCacheVersion = 3
+
+var (
+	voiceBudgetOnce     sync.Once
+	voiceBudgetDeadline time.Time
+)
+
+// voiceTranscriptionBudgetLeft bounds the time one call spends transcribing.
+// Voices past the budget report status "pending"; the next read continues.
+func voiceTranscriptionBudgetLeft() bool {
+	voiceBudgetOnce.Do(func() {
+		seconds := 25
+		if raw := envFirst("WECHAT_CLI_VOICE_BUDGET_SECONDS"); raw != "" {
+			if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+				seconds = n
+			}
+		}
+		voiceBudgetDeadline = time.Now().Add(time.Duration(seconds) * time.Second)
+	})
+	return time.Now().Before(voiceBudgetDeadline)
+}
+
+func preferredVoiceEngine() string {
+	if envFirst("WECHAT_CLI_VOICE_TRANSCRIBE_CMD", "WX_MCP_VOICE_TRANSCRIBE_CMD") != "" {
+		return "custom"
+	}
+	if commandPath(firstNonEmpty(envFirst("WECHAT_CLI_WHISPER_CLI", "WX_MCP_WHISPER_CLI"), "whisper-cli")) != "" && findWhisperModel() != "" {
+		return "whisper.cpp"
+	}
+	return "faster-whisper"
+}
+
+// A failed transcription by the same engine is retried after an hour, not on
+// every read.
+func recentVoiceTranscriptFailure(cachePath string, cached map[string]any) bool {
+	if stringMapValue(cached, "status") != "unavailable" || stringMapValue(cached, "engine") != preferredVoiceEngine() {
+		return false
+	}
+	st, err := os.Stat(cachePath)
+	return err == nil && time.Since(st.ModTime()) < time.Hour
+}
 
 func voiceTranscriptCacheUsable(cached map[string]any) bool {
 	if len(cached) == 0 {
@@ -5201,20 +5305,22 @@ func runLocalVoiceASR(audioPath string) (text, engine, model string, err error) 
 		text, err = runConfiguredVoiceTranscriber(cmd, audioPath)
 		return text, "custom", "", err
 	}
-	if python := findFasterWhisperPython(); python != "" {
-		return runFasterWhisperVoiceASRWithPython(python, audioPath)
-	}
-	cli, err := exec.LookPath(firstNonEmpty(envFirst("WECHAT_CLI_WHISPER_CLI", "WX_MCP_WHISPER_CLI"), "whisper-cli"))
-	if err != nil {
-		return "", "local_asr", "", fmt.Errorf("whisper-cli not found")
-	}
+	// whisper.cpp runs on the Apple GPU and transcribes a 10 s clip in a few
+	// seconds; faster-whisper on CPU can take minutes, so it is the fallback.
+	cli := commandPath(firstNonEmpty(envFirst("WECHAT_CLI_WHISPER_CLI", "WX_MCP_WHISPER_CLI"), "whisper-cli"))
 	model = findWhisperModel()
-	if model == "" {
+	if cli == "" || model == "" {
+		if python := findFasterWhisperPython(); python != "" {
+			return runFasterWhisperVoiceASRWithPython(python, audioPath)
+		}
+		if cli == "" {
+			return "", "local_asr", "", fmt.Errorf("whisper-cli not found")
+		}
 		return "", "whisper.cpp", "", fmt.Errorf("whisper model not found; set WECHAT_CLI_WHISPER_MODEL")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), voiceCommandTimeout())
 	defer cancel()
-	out, err := exec.CommandContext(ctx, cli, "-m", model, "-f", audioPath, "-l", "auto", "-nt", "-np").Output()
+	out, err := exec.CommandContext(ctx, cli, whisperCLIArgs(model, audioPath)...).Output()
 	if err != nil {
 		return "", "whisper.cpp", model, err
 	}
@@ -5431,9 +5537,22 @@ func findWhisperModel() string {
 	return ""
 }
 
+func whisperCLIArgs(model, audioPath string) []string {
+	runtimeCfg, _ := loadASRRuntimeConfig()
+	language := firstNonEmpty(envFirst("WECHAT_CLI_VOICE_LANGUAGE", "WX_MCP_VOICE_LANGUAGE"), runtimeCfg.Language, "zh")
+	args := []string{"-m", model, "-f", audioPath, "-l", language, "-nt", "-np"}
+	if language == "zh" {
+		// Whisper otherwise drifts into traditional characters.
+		args = append(args, "--prompt", "以下是普通话的句子。")
+	}
+	return args
+}
+
 func whisperModelRank(path string) int {
 	name := strings.ToLower(filepath.Base(path))
 	switch {
+	case strings.Contains(name, "large-v3-turbo"):
+		return 7
 	case strings.Contains(name, "large"):
 		return 6
 	case strings.Contains(name, "medium"):
@@ -6141,7 +6260,13 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 	case "voice":
 		return "(" + col + " & 4294967295) = ?", []any{int64(34)}, nil
 	case "card":
-		return "(" + col + " & 4294967295) = ?", []any{int64(42)}, nil
+		return "(" + col + " & 4294967295) IN (?, ?)", []any{int64(42), int64(66)}, nil
+	case "mail":
+		return "(" + col + " & 4294967295) = ?", []any{int64(35)}, nil
+	case "channel_live":
+		return col + " = ?", []any{packedLocalType(49, 63)}, nil
+	case "gift":
+		return col + " = ?", []any{packedLocalType(49, 124)}, nil
 	case "video":
 		return "(" + col + " & 4294967295) = ?", []any{int64(43)}, nil
 	case "sticker", "emoji":
@@ -8537,7 +8662,12 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 			"voice_url":    m.VoiceMsg.VoiceURL,
 			"aeskey":       m.VoiceMsg.AesKey,
 		})
-	case 42:
+	case 35, 50:
+		if rich := parseRichKinds(baseKind, subtype, xmlStr); rich != nil {
+			return rich
+		}
+		return nil
+	case 42, 66:
 		var m xmlMsgCard
 		if err := xml.Unmarshal([]byte(xmlStr), &m); err != nil {
 			return map[string]any{"parse_error": err.Error(), "kind": "card"}
@@ -8640,6 +8770,9 @@ func parseMessageContent(baseKind, subtype int32, raw string, depth int) any {
 			}
 			out["refermsg"] = refer
 		}
+		for k, v := range parseRichKinds(baseKind, subtype, xmlStr) {
+			out[k] = v
+		}
 		return out
 	}
 	return nil
@@ -8696,6 +8829,9 @@ func stripVerifiedSenderPrefix(raw, sender string) string {
 // placeholder; app → title or quoted-reply composite. Depth-bounded implicitly
 // via parseMessageContent.
 func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt ...string) string {
+	if rich := richSummary(baseKind, subtype, parsed); rich != "" {
+		return rich
+	}
 	switch baseKind {
 	case 1:
 		if len(senderOpt) > 0 {
@@ -8711,7 +8847,7 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt .
 			}
 		}
 		return "[语音]"
-	case 42:
+	case 42, 66:
 		if p, _ := parsed.(map[string]any); p != nil {
 			if name := firstNonEmpty(stringMapValue(p, "nickname"), stringMapValue(p, "username")); name != "" {
 				return "[名片] " + name
@@ -8777,6 +8913,8 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt .
 			return title
 		}
 		return "[应用消息]"
+	case 35:
+		return "[邮件]"
 	case 50:
 		return "[通话]"
 	case 10000:

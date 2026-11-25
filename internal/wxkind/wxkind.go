@@ -10,12 +10,14 @@ var BaseKindNames = map[int32]string{
 	1:     "text",
 	3:     "image",
 	34:    "voice",
+	35:    "mail",
 	42:    "card",
 	43:    "video",
 	47:    "sticker",
 	48:    "location",
 	49:    "app",
 	50:    "voip",
+	66:    "card",
 	10000: "system",
 }
 
@@ -23,6 +25,7 @@ var BaseKindNames = map[int32]string{
 // precise human-readable kind. Falls back to "app" when subtype is unknown.
 var AppSubtypeNames = map[int32]string{
 	3:    "music",
+	4:    "link",
 	5:    "link",
 	6:    "file",
 	8:    "file",
@@ -31,12 +34,15 @@ var AppSubtypeNames = map[int32]string{
 	33:   "miniprogram",
 	36:   "miniprogram",
 	49:   "link",
+	17:   "location_share",
 	51:   "channel_video",
 	53:   "solitaire",
 	57:   "quote",
 	62:   "pat",
+	63:   "channel_live",
 	76:   "music",
 	87:   "announcement",
+	124:  "gift",
 	2000: "transfer",
 	2001: "red_packet",
 }

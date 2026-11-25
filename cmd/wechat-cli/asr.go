@@ -190,7 +190,7 @@ func asrStatusData() map[string]any {
 	return compactMap(map[string]any{
 		"ready":                 asrReady,
 		"wechat_voice_ready":    asrReady && silkReady,
-		"default_engine":        "faster-whisper",
+		"default_engine":        preferredVoiceEngine(),
 		"default_model":         firstNonEmpty(runtimeCfg.Model, defaultFasterWhisperModel),
 		"default_language":      firstNonEmpty(runtimeCfg.Language, "zh"),
 		"default_device":        firstNonEmpty(runtimeCfg.Device, "cpu"),
@@ -247,13 +247,24 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 	}
 
 	venvPython := asrVenvPythonPath(venv)
+	gpuWhisper := runtime.GOOS == "darwin"
 	actions := []string{
 		"create ASR virtualenv at " + venv,
 		"upgrade pip in ASR virtualenv",
-		"install or upgrade faster-whisper and silk-python in ASR virtualenv",
 	}
-	if !opts.SkipModelDownload {
-		actions = append(actions, "preload faster-whisper model "+opts.Model)
+	if gpuWhisper {
+		actions = append(actions, "install or upgrade silk-python in ASR virtualenv")
+		if commandPath("whisper-cli") == "" {
+			actions = append(actions, "brew install whisper-cpp")
+		}
+		if findWhisperModel() == "" && !opts.SkipModelDownload {
+			actions = append(actions, "download "+whisperCPPModelName+" to "+whisperCPPModelDir())
+		}
+	} else {
+		actions = append(actions, "install or upgrade faster-whisper and silk-python in ASR virtualenv")
+		if !opts.SkipModelDownload {
+			actions = append(actions, "preload faster-whisper model "+opts.Model)
+		}
 	}
 	if opts.Force {
 		if err := validateASRForceVenv(venv); err != nil {
@@ -294,10 +305,19 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 	if out, err := runASRSetupCommand(venvPython, "-m", "pip", "install", "--upgrade", "pip"); err != nil {
 		return nil, fmt.Errorf("upgrade ASR pip failed: %w: %s", err, trimCommandOutput(out))
 	}
-	if out, err := runASRSetupCommand(venvPython, "-m", "pip", "install", "--upgrade", "faster-whisper", "silk-python"); err != nil {
-		return nil, fmt.Errorf("install faster-whisper/silk-python failed: %w: %s", err, trimCommandOutput(out))
+	packages := []string{"faster-whisper", "av<19", "silk-python"}
+	if gpuWhisper {
+		packages = []string{"silk-python"}
 	}
-	if !opts.SkipModelDownload {
+	if out, err := runASRSetupCommand(venvPython, append([]string{"-m", "pip", "install", "--upgrade"}, packages...)...); err != nil {
+		return nil, fmt.Errorf("install %s failed: %w: %s", strings.Join(packages, ", "), err, trimCommandOutput(out))
+	}
+	if gpuWhisper {
+		if err := ensureWhisperCPP(!opts.SkipModelDownload); err != nil {
+			return nil, err
+		}
+	}
+	if !gpuWhisper && !opts.SkipModelDownload {
 		env := append(os.Environ(),
 			"WECHAT_CLI_FASTER_WHISPER_DEVICE="+opts.Device,
 			"WECHAT_CLI_FASTER_WHISPER_COMPUTE_TYPE="+opts.ComputeType,
@@ -391,6 +411,49 @@ func pathContains(parent, child string) bool {
 		return false
 	}
 	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel))
+}
+
+// The q5_0 large-v3-turbo build is 574 MB and close to large-v3 accuracy
+// for Chinese; the hash pins the exact file whisper.cpp publishes.
+const (
+	whisperCPPModelName   = "ggml-large-v3-turbo-q5_0.bin"
+	whisperCPPModelURL    = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/" + whisperCPPModelName
+	whisperCPPModelSHA256 = "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
+)
+
+func whisperCPPModelDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cache", "whisper-cpp")
+}
+
+func ensureWhisperCPP(downloadModel bool) error {
+	if commandPath("whisper-cli") == "" {
+		brew := commandPath("brew")
+		if brew == "" {
+			return fmt.Errorf("whisper-cli not found and Homebrew is unavailable; install whisper-cpp")
+		}
+		if out, err := runASRSetupCommand(brew, "install", "whisper-cpp"); err != nil {
+			return fmt.Errorf("brew install whisper-cpp failed: %w: %s", err, trimCommandOutput(out))
+		}
+	}
+	if findWhisperModel() != "" || !downloadModel {
+		return nil
+	}
+	dir := whisperCPPModelDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	final := filepath.Join(dir, whisperCPPModelName)
+	part := final + ".part"
+	// curl resumes a partial download; slow links often drop mid-file.
+	if out, err := runASRSetupCommand("curl", "-fsSL", "-C", "-", "--retry", "5", "--retry-all-errors", "-o", part, whisperCPPModelURL); err != nil {
+		return fmt.Errorf("download %s failed: %w: %s", whisperCPPModelName, err, trimCommandOutput(out))
+	}
+	if fileSHA256(part) != whisperCPPModelSHA256 {
+		_ = os.Remove(part)
+		return fmt.Errorf("%s checksum mismatch; removed the download, retry asr setup", whisperCPPModelName)
+	}
+	return os.Rename(part, final)
 }
 
 const fasterWhisperWarmupPythonScript = `
