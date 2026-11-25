@@ -16,12 +16,13 @@ performed by repository migration. Additive JSON fields are version/commit metad
 The initial public source tag `v2.0.0` identifies the initial import, not an accepted
 binary release. It is not moved. `v2.0.1-rc.1` through `rc.6` were previews in this
 repository. The `v2.0.1` tag never produced a package (the stable build still
-called notarization); `v2.0.2` is the first v2 stable release. Do not reuse a published
-source tag or asset name.
+called notarization); `v2.0.2` is the first v2 stable release. The `v2.0.4` tag
+never produced a release (its bundled wxkey left WeChat closed after preparing the
+shadow copy); `v2.0.5` replaces it. Do not reuse a published source tag or asset name.
 
 ## Build inputs
 
-`release-dependencies.json` pins wxkey v1.4.10 by full commit and WCDB 2.1.16 by
+`release-dependencies.json` pins wxkey v1.4.11 by full commit and WCDB 2.1.16 by
 upstream release ZIP SHA256 and source commit. WCDB builds with CMake for arm64,
 macOS 12+, CommonCrypto and zstd disabled. Runtime message decompression remains
 in Go. The build reads no user's WeChat database and requires no sibling checkout.
