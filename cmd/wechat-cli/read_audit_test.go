@@ -173,7 +173,7 @@ func TestGroupVoiceQuoteUsesConversationForVoiceLookup(t *testing.T) {
 	t.Setenv("WECHAT_CLI_STRICT_READ_ONLY", "1")
 	refer := map[string]any{"type": int64(34), "chatusr": "fixture_member", "fromusr": talker, "svrid": "101", "createtime": int64(100), "content_parsed": parsed}
 	hints := quoteXMLReadHints(s, wcdb.Row{"talker": talker}, map[string]any{"refermsg": refer})
-	if len(hints) != 1 || hints[0]["source"] != "media_0_voiceinfo" || mapStringAny(hints[0]["transcript"])["text"] != "fixture voice" {
+	if len(hints) != 1 || hints[0]["source"] != "media_voiceinfo" || mapStringAny(hints[0]["transcript"])["text"] != "fixture voice" {
 		t.Fatalf("group voice quote looked up sender as conversation: %#v", hints)
 	}
 }
