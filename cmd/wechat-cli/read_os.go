@@ -236,7 +236,7 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 	cfg, cfgErr := s.activeConfigNoSetup()
 	if cfgErr != nil {
 		status["config_error"] = cfgErr.Error()
-		setBlocked("config_error", "Run first key setup, then rerun status.", readOSBootstrapCommand(), appName+" status --pretty")
+		setBlocked("config_error", firstKeySetupAction(), readOSBootstrapCommand(), appName+" status --pretty")
 	} else {
 		if cfg.KeyStore == "keychain" {
 			status["key_store"] = "keychain"
@@ -257,9 +257,9 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 			})
 		}
 		if cfg.DBRoot == "" {
-			setBlocked("db_root_missing", "Configure WeChat DB root through first key setup.", readOSBootstrapCommand(), appName+" status --pretty")
+			setBlocked("db_root_missing", firstKeySetupAction(), readOSBootstrapCommand(), appName+" status --pretty")
 		} else if !cfg.Ready() {
-			setBlocked("key_config_missing", "Prepare local WeChat DB keys, then rerun the read command.", readOSBootstrapCommand(), appName+" status --pretty")
+			setBlocked("key_config_missing", firstKeySetupAction(), readOSBootstrapCommand(), appName+" status --pretty")
 		} else {
 			dbReady = true
 		}
@@ -433,6 +433,14 @@ func readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists bool) map[strin
 		"voice_asr":       asrReadyBool(asrStatusData()["wechat_voice_ready"]),
 		"name_resolution": liveRead,
 	}
+}
+
+// firstKeySetupAction names the command so an agent can act on next_action alone.
+func firstKeySetupAction() string {
+	if runtime.GOOS == "windows" {
+		return "Run " + readOSBootstrapCommand() + " with WeChat logged in, then rerun the read command."
+	}
+	return "Run " + readOSBootstrapCommand() + " with WeChat logged in; it needs no user input and briefly restarts WeChat. Then rerun the read command."
 }
 
 func readOSBootstrapCommand() string {
