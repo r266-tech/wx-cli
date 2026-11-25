@@ -30,7 +30,7 @@ wechat-cli agent --pretty
 
 `wxkey bootstrap` 约一分钟，会短暂退出微信、在本机数据的副本上启动影子微信取 key，结束后重新打开微信；通常无需任何点击。第一次运行会弹一次中文的 Mac 开机密码框：密码经 sudo 校验后存入当前用户钥匙串，之后的刷新都不再询问（只有改过开机密码才会再问一次，并说明原因）。密码不要粘贴给 agent、网页或终端日志；不接受这一取舍时请取消引导。
 
-bootstrap 写下的 key 会在 wechat-cli 下一次读取时自动迁入钥匙串，不需要额外步骤。完全磁盘访问权限不是必需的；只有 macOS 反复弹隐私授权时，才需要把 `~/.local/share/wechat-cli/wechat-cli` 和 `wxkey` 加进 **系统设置 → 隐私与安全性 → 完全磁盘访问权限**。
+bootstrap 写下的 key 会在 wechat-cli 下一次读取时自动迁入钥匙串，不需要额外步骤。从 2.0.6 起，`wechat-cli update` 升级时会把钥匙串里的 key 交给新版本，不用再跑 bootstrap，也不会关微信。从 2.0.5 及更早版本升级时，仍需要跑一次 bootstrap。完全磁盘访问权限不是必需的；只有 macOS 反复弹隐私授权时，才需要把 `~/.local/share/wechat-cli/wechat-cli` 和 `wxkey` 加进 **系统设置 → 隐私与安全性 → 完全磁盘访问权限**。
 
 ### Windows
 

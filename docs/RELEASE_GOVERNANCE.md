@@ -101,6 +101,12 @@ on the Windows CI runner; a macOS run does not replace native Windows acceptance
 
 An ad-hoc signed candidate has a different code identity from an older binary.
 macOS can therefore require authorization to read the existing runtime item.
+Since 2.0.6 the installer hands the keys over: before replacing the binary it
+runs the installed one's `keychain handoff`, which stages the keys in the 0600
+config in the shape wxkey writes, and right after it runs the new binary's
+`keychain migrate`, which stores them in an item the new binary owns. The access
+list is never widened. Updating from 2.0.5 or older still needs the recovery
+below once, because those binaries lack `keychain handoff`.
 Normal commands remain noninteractive: `keychain status` reports
 `keychain_access_required` with `loaded=false`, without exposing the item.
 The unattended recovery is `wxkey bootstrap`: the next read migrates the fresh

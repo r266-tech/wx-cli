@@ -97,6 +97,26 @@ func (s *server) toolKeychainAuthorize(a map[string]any) (any, error) {
 	return map[string]any{"store": "keychain", "loaded": cfg.Ready(), "status": "authorized", "key_count": len(cfg.Keys)}, nil
 }
 
+// toolKeychainHandoff runs on the old binary right before an update replaces
+// it; see config.StageKeychainHandoff.
+func (s *server) toolKeychainHandoff(a map[string]any) (any, error) {
+	if strictReadOnlyMode() {
+		return nil, fmt.Errorf("strict_read_only: keychain handoff writes local secret/config state")
+	}
+	if !keystore.Available() {
+		return nil, keystore.ErrUnavailable
+	}
+	n, err := config.StageKeychainHandoff()
+	if err != nil {
+		return nil, fmt.Errorf("keychain handoff failed: %w", err)
+	}
+	return map[string]any{
+		"status":      "staged",
+		"key_count":   n,
+		"next_action": "Replace the binary, then run any read (or keychain migrate) with the new one; it stores the keys in its own Keychain item and removes them from config.json.",
+	}, nil
+}
+
 func (s *server) toolKeychainMigrate(a map[string]any) (any, error) {
 	if strictReadOnlyMode() {
 		return nil, fmt.Errorf("strict_read_only: keychain migration writes local secret/config state")

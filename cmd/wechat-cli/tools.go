@@ -86,7 +86,7 @@ func toolLocalWriteMode(name string) string {
 	switch name {
 	case "cache_refresh", "cache_rebuild", "export_messages":
 		return "required"
-	case "digest_source", "archive_create", "archive_delete", "archive_restore", "keychain_migrate", "keychain_authorize":
+	case "digest_source", "archive_create", "archive_delete", "archive_restore", "keychain_migrate", "keychain_authorize", "keychain_handoff":
 		return "required"
 	case "messages", "chat_timeline", "message_context", "read_events", "media_resources", "search_with_context", "forward_history",
 		"sessions", "unread", "resolve_chat", "contacts", "contact_labels", "group_members", "search", "stats",
@@ -237,7 +237,7 @@ func toolInProfile(name, profile string) bool {
 		}
 	case "maintenance":
 		switch name {
-		case "cache_status", "cache_refresh", "cache_rebuild", "export_messages", "schema", "sql", "archive_create", "archive_validate", "archive_list", "archive_delete", "archive_restore", "keychain_status", "keychain_migrate", "keychain_authorize":
+		case "cache_status", "cache_refresh", "cache_rebuild", "export_messages", "schema", "sql", "archive_create", "archive_validate", "archive_list", "archive_delete", "archive_restore", "keychain_status", "keychain_migrate", "keychain_authorize", "keychain_handoff":
 			return true
 		}
 	}
@@ -304,6 +304,9 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name: "keychain_migrate", Description: "将旧 config.json schema-2 keys 安全迁移到 macOS Keychain，并保留可回滚配置.", InputSchema: jsonSchema(props{}, nil),
+	},
+	{
+		Name: "keychain_handoff", Description: "升级前把钥匙串里的 key 暂存回 config.json（0600，与 wxkey 写入的格式相同），新版本第一次读取时自动存进它自己名下的钥匙串，不输出密钥；安装器在替换二进制前自动调用.", InputSchema: jsonSchema(props{}, nil),
 	},
 	{
 		Name: "keychain_authorize", Description: "显式请求 macOS 对当前二进制授予已有 Keychain item 的访问权；用户在系统弹窗中操作，不输出密钥，不修改 config.", InputSchema: jsonSchema(props{"interactive": boolProp("必须显式为 true；允许本次调用显示 macOS 授权窗口")}, []string{"interactive"}),
