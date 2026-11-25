@@ -1672,6 +1672,9 @@ func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
 	refSender := firstNonEmpty(stringMapValue(refer, "displayname"), stringMapValue(refer, "fromusr"))
 	if stringMapValue(refer, "displayname") == "" && stringMapValue(refer, "fromusr") == rowString(r, "sender_wxid") {
 		refSender = agentMessageSender(r)
+	} else if looksLikeRawChatID(refSender) && refSender == rowString(r, "talker") && rowString(r, "talker_display_name") != "" {
+		// In a private chat the quoted person is the chat itself.
+		refSender = rowString(r, "talker_display_name")
 	}
 	quote := map[string]any{
 		"sender": refSender,

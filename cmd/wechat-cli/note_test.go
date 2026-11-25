@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
 	"github.com/r266-tech/wx-cli/v2/internal/wxkind"
 )
 
@@ -44,5 +45,20 @@ func TestFileRefsDropWeChatDuplicateDownloads(t *testing.T) {
 	got := dedupeAgentFileRefs(refs)
 	if len(got) != 2 || got[0]["path"] != "/f/plan.dmg" || got[1]["path"] != "/f/plan(3).dmg" {
 		t.Fatalf("got %v", got)
+	}
+}
+
+func TestPrivateChatQuoteSenderUsesChatName(t *testing.T) {
+	r := wcdb.Row{
+		"kind_name":           "quote",
+		"talker":              "wxid_friend",
+		"talker_display_name": "Friend",
+		"sender_wxid":         "wxid_me",
+		"message_content_parsed": map[string]any{"refermsg": map[string]any{
+			"type": int64(1), "fromusr": "wxid_friend", "content_raw": "hi", "svrid": "1",
+		}},
+	}
+	if q := agentQuote(r, nil); q["sender"] != "Friend" {
+		t.Fatalf("quote sender = %v, want the chat display name", q["sender"])
 	}
 }
