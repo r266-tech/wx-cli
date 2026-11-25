@@ -662,9 +662,30 @@ func runToolResult(name string, flags map[string]any, command string) (any, stri
 		if errors.Is(err, keystore.ErrInteractionRequired) || errors.Is(err, keystore.ErrAuthorizationDenied) || errors.Is(err, keystore.ErrItemNotFound) || errors.Is(err, keystore.ErrUnavailable) {
 			return nil, keychainDiagnosticCode(err), err
 		}
-		return nil, "tool_error", err
+		return nil, toolErrorCode(err), err
 	}
 	return cliAgentDataEnvelope(name, command, responseArgs, result), "", nil
+}
+
+// toolErrorPrefixCodes are machine-readable codes that tools put at the start
+// of an error message ("code: detail"), so agents can branch on error.code
+// instead of parsing text.
+var toolErrorPrefixCodes = []string{
+	"db_keys_missing",
+	"invalid_argument",
+	"message_cursor_stale",
+	"message_cursor_source_incomplete",
+	"strict_read_only",
+}
+
+func toolErrorCode(err error) string {
+	msg := err.Error()
+	for _, code := range toolErrorPrefixCodes {
+		if strings.HasPrefix(msg, code+":") {
+			return code
+		}
+	}
+	return "tool_error"
 }
 
 func cliToolFetchArgs(tool string, args map[string]any) map[string]any {
@@ -1194,8 +1215,13 @@ func cliErrorAdvice(errCode, message, tool, command string) cliAdvice {
 	switch errCode {
 	case "keychain_access_required", "keychain_authorization_denied":
 		return cliAdvice{
-			NextAction:        "Run keychain authorize --interactive locally and approve the macOS dialog, then retry the read.",
-			SuggestedCommands: []string{appName + " keychain authorize --interactive", appName + " keychain status"},
+			NextAction:        "This binary cannot read the Keychain item written by an earlier version. Without asking the user: run wxkey bootstrap (about a minute, briefly restarts WeChat), then retry; the next read stores the keys for this version. Alternative that needs the user to approve a macOS dialog: keychain authorize --interactive.",
+			SuggestedCommands: []string{readOSBootstrapCommand(), appName + " keychain status", appName + " keychain authorize --interactive"},
+		}
+	case "db_keys_missing":
+		return cliAdvice{
+			NextAction:        "Capture the WeChat DB keys without asking the user: run wxkey bootstrap (about a minute, briefly restarts WeChat; asks for the Mac password only if none is stored yet), then retry the read.",
+			SuggestedCommands: []string{readOSBootstrapCommand(), appName + " status --pretty"},
 		}
 	case "keychain_item_missing", "keychain_unavailable":
 		return cliAdvice{

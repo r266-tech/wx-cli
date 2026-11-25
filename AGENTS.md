@@ -196,14 +196,11 @@ Keychain credentials.
 
 ## TCC Quiet Mode
 
-After macOS install completes, advise the user once:
-
-1. Open **System Settings -> Privacy & Security -> Full Disk Access**.
-2. Add both `~/.local/share/wechat-cli/wechat-cli` and
-   `~/.local/share/wechat-cli/wxkey`.
-
-Without this, macOS 15+ may prompt on cross-container DB reads. The installer
-does not install a launchd watcher by default for the same reason.
+Full Disk Access is optional. Do not ask the user for it up front. Only if
+macOS keeps showing privacy prompts on DB reads, ask the user once to add
+`~/.local/share/wechat-cli/wechat-cli` and `~/.local/share/wechat-cli/wxkey`
+under **System Settings -> Privacy & Security -> Full Disk Access**. The
+installer does not install a launchd watcher by default.
 
 ## Agent Defaults
 

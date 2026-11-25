@@ -28,10 +28,9 @@ curl -fsSL https://github.com/r266-tech/wechat-cli-releases/releases/latest/down
 wechat-cli agent --pretty
 ```
 
-首次执行 `wxkey bootstrap` 可能会退出并重新打开微信，并通过本机隐藏窗口请求管理员密码。为支持后续无人值守刷新，当前实现会将经 sudo 验证的密码存入当前用户 Keychain；密码不要粘贴给 agent、网页或终端日志。不接受这一取舍时请取消引导。安装完成后，建议在 **系统设置 → 隐私与安全性 → 完全磁盘访问权限** 中加入：
+`wxkey bootstrap` 约一分钟，会短暂退出微信、在本机数据的副本上启动影子微信取 key，结束后重新打开微信；通常无需任何点击。第一次运行会弹一次中文的 Mac 开机密码框：密码经 sudo 校验后存入当前用户钥匙串，之后的刷新都不再询问（只有改过开机密码才会再问一次，并说明原因）。密码不要粘贴给 agent、网页或终端日志；不接受这一取舍时请取消引导。
 
-- `~/.local/share/wechat-cli/wechat-cli`
-- `~/.local/share/wechat-cli/wxkey`
+bootstrap 写下的 key 会在 wechat-cli 下一次读取时自动迁入钥匙串，不需要额外步骤。完全磁盘访问权限不是必需的；只有 macOS 反复弹隐私授权时，才需要把 `~/.local/share/wechat-cli/wechat-cli` 和 `wxkey` 加进 **系统设置 → 隐私与安全性 → 完全磁盘访问权限**。
 
 ### Windows
 
@@ -257,7 +256,7 @@ Windows：
 .\install.ps1 -Uninstall -PurgeState -DryRun -Json
 ```
 
-危险目录会被拒绝；卸载只删除受管理的安装目录。`--purge-state` 会额外清除本机 key/config/cache/log 与托管凭据。
+危险目录会被拒绝；卸载只删除受管理的安装目录。`--clear-state` 用于重置：清除 key（含钥匙串里的 DB key）、配置、缓存、日志和影子微信，保留已存的 sudo 凭据（下次 bootstrap 不再问密码）和你导出的 digests/archives。`--uninstall --purge-state` 全部清除，包括 sudo 凭据。
 
 ## 排障
 

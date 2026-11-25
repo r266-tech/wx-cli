@@ -46,8 +46,9 @@ func (s *server) toolKeychainStatus(a map[string]any) (any, error) {
 		code := keychainDiagnosticCode(loadErr)
 		data["code"] = code
 		if code == "keychain_access_required" {
-			data["next_action"] = "Run keychain authorize --interactive and approve access in the macOS dialog, then retry status."
-			data["suggested_commands"] = []string{appName + " keychain authorize --interactive", appName + " keychain status"}
+			advice := cliErrorAdvice(code, "", "keychain_status", "keychain status")
+			data["next_action"] = advice.NextAction
+			data["suggested_commands"] = advice.SuggestedCommands
 		}
 	}
 	return data, nil
@@ -92,6 +93,12 @@ func (s *server) toolKeychainMigrate(a map[string]any) (any, error) {
 	if !keystore.Available() {
 		return nil, fmt.Errorf("macOS Keychain runtime store is unavailable on %s", runtime.GOOS)
 	}
+	return migrateKeysToKeychain()
+}
+
+// migrateKeysToKeychain moves plaintext runtime keys (as written by wxkey)
+// into the Keychain and removes the plaintext copies once read back.
+func migrateKeysToKeychain() (map[string]any, error) {
 	backupDir, err := appStateDir()
 	if err != nil {
 		return nil, err
@@ -129,6 +136,24 @@ func (s *server) toolKeychainMigrate(a map[string]any) (any, error) {
 		data["next_action"] = "Remove the remaining files under " + keychainMigrationDir() + " manually; they contain database keys."
 	}
 	return data, nil
+}
+
+// autoMigrateLegacyKeys runs the Keychain migration without being asked when
+// wxkey has just written plaintext keys, so agents never need a separate step.
+// It never blocks reads: on failure the plaintext keys keep working.
+func autoMigrateLegacyKeys(cfg *config.Config) bool {
+	if cfg == nil || !cfg.Ready() || strictReadOnlyMode() ||
+		runtime.GOOS != "darwin" || !keystore.Available() || os.Getenv("WECHAT_CLI_NO_KEYCHAIN_MIGRATE") == "1" {
+		return false
+	}
+	if meta, err := config.LoadRuntimeKeyMetadata(); err != nil || meta.Store != "config_legacy" {
+		return false
+	}
+	if _, err := migrateKeysToKeychain(); err != nil {
+		fmt.Fprintf(os.Stderr, "[%s] keys stay in config.json; automatic Keychain migration failed: %v\n", appName, err)
+		return false
+	}
+	return true
 }
 
 func keychainMigrationDir() string {

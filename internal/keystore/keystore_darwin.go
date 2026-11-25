@@ -9,8 +9,11 @@ package keystore
 #include <stdlib.h>
 static int save_item(const char*s,const char*a,const void*d,int n){
  SecKeychainItemRef old=NULL; OSStatus st=SecKeychainFindGenericPassword(NULL,(UInt32)strlen(s),s,(UInt32)strlen(a),a,NULL,NULL,&old);
- if(st==errSecSuccess){ st=SecKeychainItemModifyAttributesAndData(old,NULL,(UInt32)n,d); CFRelease(old); return (int)st; }
- if(st!=errSecItemNotFound) return (int)st;
+ // Replace instead of modify: modifying an item created by an earlier binary
+ // needs that binary's access, deleting it does not. The new item is bound to
+ // the current binary exactly as before.
+ if(st==errSecSuccess){ st=SecKeychainItemDelete(old); CFRelease(old); if(st!=errSecSuccess) return (int)st; }
+ else if(st!=errSecItemNotFound) return (int)st;
  st=SecKeychainAddGenericPassword(NULL,(UInt32)strlen(s),s,(UInt32)strlen(a),a,(UInt32)n,d,NULL); return (int)st;
 }
 static int load_item(const char*s,const char*a,void**d,UInt32*n){

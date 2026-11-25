@@ -141,6 +141,11 @@ func (s *server) ensure() error {
 		}
 		cfg = s.cfg
 	}
+	if autoMigrateLegacyKeys(cfg) {
+		if migrated, err := config.Load(); err == nil && migrated.Ready() {
+			cfg = migrated
+		}
+	}
 	s.cfg = cfg
 	s.wcdbPath = wcdbPath
 	s.ok = true
@@ -174,13 +179,13 @@ func (s *server) refreshKeysFromWxkey(reason string) error {
 	}
 	s.keyRefreshLast[key] = time.Now()
 	if until, cooling := wxkeyCoolingDown("setup"); cooling {
-		return fmt.Errorf("%s; automatic wxkey setup failed recently, next attempt after %s. Run `~/.local/share/wechat-cli/wxkey bootstrap` to capture keys now", reason, until.Format("15:04"))
+		return fmt.Errorf("db_keys_missing: %s; automatic wxkey setup failed recently, next attempt after %s. Run `~/.local/share/wechat-cli/wxkey bootstrap` to capture keys now", reason, until.Format("15:04"))
 	}
 	fmt.Fprintf(os.Stderr, "[%s] %s — running wxkey key setup...\n", appName, diagnostics.Redact(reason))
 	res, _, err := runWxkeySetup()
 	if err != nil {
 		markWxkeyFailed("setup")
-		return fmt.Errorf("%w\nOn macOS, run `wxkey bootstrap` once to prepare the no-SIP key cache. On Windows, keep WeChat logged in, verify WECHAT_CLI_DB_ROOT matches the logged-in account, then retry.", err)
+		return fmt.Errorf("db_keys_missing: automatic wxkey setup could not capture keys (%s). On macOS run `wxkey bootstrap`; on Windows keep WeChat logged in, verify WECHAT_CLI_DB_ROOT, then retry. Detail: %w", diagnostics.Redact(reason), err)
 	}
 	clearWxkeyFailed("setup")
 	beforeCount := 0
@@ -549,6 +554,7 @@ const aggSenderPrefix = "_$_CUSTOM_USERNAME_PREFIX_$_"
 var aggregatorSessions = map[string]bool{
 	"brandsessionholder":        true, // 订阅号合集
 	"brandservicesessionholder": true, // 服务号合集
+	"@placeholder_foldgroup":    true, // 折叠的群聊
 }
 
 func stripAggSenderPrefix(s string) string {
@@ -749,12 +755,17 @@ func copyToolArgs(a map[string]any) map[string]any {
 }
 
 func messageTimelineEnvelope(args map[string]any, rows []wcdb.Row, messages []map[string]any, page messagePageInfo, queryOrder, displayOrder string) map[string]any {
-	return compactMap(map[string]any{
+	out := compactMap(map[string]any{
 		"query":     chatTimelineQueryMeta(args, rows, page, queryOrder, displayOrder, len(messages)),
 		"freshness": chatTimelineFreshnessMeta(args, rows, page),
 		"warnings":  page.Warnings,
-		"messages":  messages,
 	})
+	// The output contract keeps list fields as arrays even when a page is empty.
+	if messages == nil {
+		messages = []map[string]any{}
+	}
+	out["messages"] = messages
+	return out
 }
 
 func chatTimelineQueryMeta(args map[string]any, rows []wcdb.Row, page messagePageInfo, queryOrder, displayOrder string, returned int) map[string]any {
@@ -975,7 +986,7 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		return nil, messagePageInfo{}, err
 	}
 	if aggregatorSessions[talker] {
-		return nil, messagePageInfo{}, fmt.Errorf("%q 是订阅号合集入口 (UI 聚合 session), 本身无消息表. 真实消息在各 gh_* 公众号下, 按具体 gh_<id> 查", talker)
+		return nil, messagePageInfo{}, fmt.Errorf("invalid_argument: %q is a folder session (chat_type=folded) with no messages of its own; list the real chats with sessions --type-filter private,group,official_account and pass their username", talker)
 	}
 	tableName := "Msg_" + talkerHash(talker)
 	shards, err := s.findMsgDBs(tableName)

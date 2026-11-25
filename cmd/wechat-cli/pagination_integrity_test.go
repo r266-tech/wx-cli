@@ -46,3 +46,13 @@ func TestTimelineShardWarningDoesNotMisreportMediaEnrichment(t *testing.T) {
 		t.Fatalf("freshness = %#v", freshness)
 	}
 }
+
+func TestTimelineEnvelopeKeepsEmptyMessagesArray(t *testing.T) {
+	for _, messages := range [][]map[string]any{nil, {}} {
+		env := messageTimelineEnvelope(map[string]any{"chat": "test"}, nil, messages, messagePageInfo{Limit: 50}, "sort_seq DESC, local_id DESC", "asc")
+		got, ok := env["messages"].([]map[string]any)
+		if !ok || got == nil || len(got) != 0 {
+			t.Fatalf("messages must be an empty array, got %#v", env["messages"])
+		}
+	}
+}
