@@ -673,6 +673,7 @@ func runToolResult(name string, flags map[string]any, command string) (any, stri
 var toolErrorPrefixCodes = []string{
 	"db_keys_missing",
 	"invalid_argument",
+	"message_anchor_ambiguous",
 	"message_cursor_stale",
 	"message_cursor_source_incomplete",
 	"strict_read_only",
@@ -1217,6 +1218,11 @@ func cliErrorAdvice(errCode, message, tool, command string) cliAdvice {
 		return cliAdvice{
 			NextAction:        "This binary cannot read the Keychain item written by an earlier version. Without asking the user: run wxkey bootstrap (about a minute, briefly restarts WeChat), then retry; the next read stores the keys for this version. Alternative that needs the user to approve a macOS dialog: keychain authorize --interactive.",
 			SuggestedCommands: []string{readOSBootstrapCommand(), appName + " keychain status", appName + " keychain authorize --interactive"},
+		}
+	case "message_anchor_ambiguous":
+		return cliAdvice{
+			NextAction:        "local_id repeats across message shards. Retry with the message's id.message_token from timeline/search output.",
+			SuggestedCommands: []string{appName + " tool-schema context"},
 		}
 	case "db_keys_missing":
 		return cliAdvice{
