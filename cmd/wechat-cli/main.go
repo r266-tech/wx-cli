@@ -473,6 +473,39 @@ func (s *server) findMsgDB(tableName string) (*wcdb.DB, error) {
 	return shards[0].DB, nil
 }
 
+var mediaShardRE = regexp.MustCompile(`^media_(\d+)\.db$`)
+
+// mediaShardNames lists media_N.db files, highest N first.
+func (s *server) mediaShardNames() []string {
+	if err := s.ensure(); err != nil {
+		return []string{"media_0.db"}
+	}
+	entries, err := os.ReadDir(filepath.Join(s.cfg.DBRoot, "db_storage", "message"))
+	if err != nil {
+		return []string{"media_0.db"}
+	}
+	type shard struct {
+		name string
+		n    int
+	}
+	var shards []shard
+	for _, e := range entries {
+		if m := mediaShardRE.FindStringSubmatch(e.Name()); m != nil && !e.IsDir() {
+			n, _ := strconv.Atoi(m[1])
+			shards = append(shards, shard{e.Name(), n})
+		}
+	}
+	sort.Slice(shards, func(i, j int) bool { return shards[i].n > shards[j].n })
+	names := make([]string, 0, len(shards))
+	for _, sh := range shards {
+		names = append(names, sh.name)
+	}
+	if len(names) == 0 {
+		return []string{"media_0.db"}
+	}
+	return names
+}
+
 func (s *server) findMsgDBs(tableName string) ([]msgShardDB, error) {
 	if err := s.ensure(); err != nil {
 		return nil, err
@@ -4986,7 +5019,7 @@ func voiceXMLReadHint(s *server, r wcdb.Row, p map[string]any, source, role stri
 		h["lookup_error"] = err.Error()
 		return h
 	}
-	h["source"] = "media_0_voiceinfo"
+	h["source"] = "media_voiceinfo"
 	h["address_type"] = "local_file"
 	h["size"] = int64(len(blob.data))
 	h["data_index"] = blob.dataIndex
@@ -5042,13 +5075,8 @@ func (s *server) voiceBlob(talker string, localID, serverID, createTime int64) (
 	if len(clauses) == 0 {
 		return nil, nil
 	}
-	db, err := s.openDB("message", "media_0.db")
-	if err != nil {
-		return nil, err
-	}
-	defer db.Close()
 	args = append(args, serverID, createTime, createTime)
-	rows, err := db.Query(fmt.Sprintf(`SELECT v.create_time, v.local_id, v.svr_id,
+	query := fmt.Sprintf(`SELECT v.create_time, v.local_id, v.svr_id,
 		v.voice_data, v.data_index
 		FROM VoiceInfo v
 		LEFT JOIN Name2Id n ON n.rowid = v.chat_name_id
@@ -5056,9 +5084,30 @@ func (s *server) voiceBlob(talker string, localID, serverID, createTime int64) (
 		ORDER BY CASE WHEN v.svr_id = ? AND v.svr_id != 0 THEN 0 ELSE 1 END,
 			CASE WHEN ? != 0 THEN ABS(v.create_time - ?) ELSE 0 END,
 			v.create_time DESC
-		LIMIT 2`, strings.Join(clauses, " OR ")), args...)
-	if err != nil || len(rows) == 0 {
-		return nil, err
+		LIMIT 2`, strings.Join(clauses, " OR "))
+	// WeChat starts a new media_N.db when one fills up (media_1 holds every
+	// voice after media_0's cutoff), so search all of them, newest first.
+	var rows []wcdb.Row
+	var lastErr error
+	for _, name := range s.mediaShardNames() {
+		db, err := s.openDB("message", name)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		found, err := db.Query(query, args...)
+		db.Close()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(found) > 0 {
+			rows = found
+			break
+		}
+	}
+	if len(rows) == 0 {
+		return nil, lastErr
 	}
 	if len(rows) > 1 && (serverID == 0 || rowInt64(rows[0], "svr_id") != serverID) {
 		return nil, fmt.Errorf("voice lookup is ambiguous without an exact server_id")

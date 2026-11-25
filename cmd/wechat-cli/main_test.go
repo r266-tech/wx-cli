@@ -1402,7 +1402,7 @@ func TestAgentMessagesExposesVoiceTranscript(t *testing.T) {
 			"length":       int64(5824),
 		},
 		"media_read_hints": []map[string]any{{
-			"source":                      "media_0_voiceinfo",
+			"source":                      "media_voiceinfo",
 			"address_type":                "local_file",
 			"resource_family":             "voice",
 			"direct_readable_local_paths": []string{"/tmp/voice.silk"},
