@@ -279,6 +279,58 @@ func MigratePersistentToKeychain(backup func(*Config) error) (MigrationResult, e
 	return result, err
 }
 
+// StageKeychainHandoff writes the Keychain runtime keys back into config.json,
+// in the shape wxkey writes, so the next wechat-cli binary moves them into a
+// Keychain item of its own on its first read. An ad-hoc signed build has a new
+// code identity, and the item only trusts the binary that wrote it, so an
+// update without this would need wxkey bootstrap (a WeChat restart) again.
+// The installer calls it on the old binary just before replacing it.
+func StageKeychainHandoff() (int, error) {
+	p, err := Path()
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	err = withConfigWriteLock(p, func(root *os.Root, base string) error {
+		raw, err := loadConfigFromRoot(root, base)
+		if err != nil {
+			return err
+		}
+		if len(raw.Keys) > 0 {
+			count = len(raw.Keys) // already plaintext; the next read migrates it
+			return nil
+		}
+		if raw.KeyStore != "keychain" {
+			return errors.New("no Keychain runtime keys to hand off")
+		}
+		var record *keystore.Record
+		probe := *raw
+		if err := hydrateRuntimeKeysWith(&probe, func(dbRoot, wxid string) (*keystore.Record, error) {
+			r, err := runtimeKeyLoad(dbRoot, wxid)
+			record = r
+			return r, err
+		}); err != nil {
+			return err
+		}
+		staged := *raw
+		staged.Keys = record.Keys
+		staged.ImageKey = record.ImageKey
+		staged.ImageXORKey = record.ImageXORKey
+		staged.KeyEpoch = record.KeyEpoch
+		staged.KeyStoreRef = ""
+		b, err := json.MarshalIndent(&staged, "", "  ")
+		if err != nil {
+			return err
+		}
+		if err := writeConfigToRoot(root, base, append(b, '\n')); err != nil {
+			return err
+		}
+		count = len(staged.Keys)
+		return nil
+	})
+	return count, err
+}
+
 func Save(c *Config) error {
 	p, err := Path()
 	if err != nil {

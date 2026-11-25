@@ -86,8 +86,9 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "agent", Aliases: []string{"read-os", "read_os", "os"}, Tool: "read_os", Usage: appName + " agent [--mode overview|coverage|workflows|status]", Description: "Agent-first WeChat Read OS entrypoint: capability map, workflows, coverage matrix, and readiness status.", Examples: []string{appName + " agent --pretty", appName + " agent --mode coverage --pretty"}},
 	{Command: "status", Aliases: []string{"doctor-lite", "doctor_lite"}, Tool: "read_os", Usage: appName + " status", Description: "Show local readiness status without reading large message bodies.", Examples: []string{appName + " status --pretty"}},
 	{Command: "doctor", Tool: "read_os", Usage: appName + " doctor [--full]", Description: "Report executable, PATH, install, wxkey, WCDB, config, cache, and live-read provenance without refreshing local state.", Examples: []string{appName + " doctor --pretty", appName + " doctor --full --pretty"}},
-	{Command: "keychain", Usage: appName + " keychain <status|migrate|authorize>", Description: "Inspect, migrate or explicitly authorize macOS runtime keys.", Examples: []string{appName + " keychain status", appName + " keychain authorize --interactive", appName + " keychain migrate"}},
+	{Command: "keychain", Usage: appName + " keychain <status|migrate|authorize|handoff>", Description: "Inspect, migrate or explicitly authorize macOS runtime keys.", Examples: []string{appName + " keychain status", appName + " keychain authorize --interactive", appName + " keychain migrate"}},
 	{Command: "keychain status", Tool: "keychain_status", Usage: appName + " keychain status", Description: "Show whether this binary can read its DB keys from the macOS Keychain, without prompting.", Examples: []string{appName + " keychain status"}},
+	{Command: "keychain handoff", Tool: "keychain_handoff", Usage: appName + " keychain handoff", Description: "Stage the Keychain keys in config.json for the next binary; the installer runs it before an update so no wxkey bootstrap is needed.", Examples: []string{appName + " keychain handoff"}},
 	{Command: "keychain migrate", Tool: "keychain_migrate", Usage: appName + " keychain migrate", Description: "Move plaintext keys from config.json into the Keychain (automatic on the next read since 2.0.3).", Examples: []string{appName + " keychain migrate"}},
 	{Command: "keychain authorize", Tool: "keychain_authorize", Usage: appName + " keychain authorize --interactive", Description: "Ask the user, through a macOS dialog, to let this binary read the Keychain item (needs --interactive).", Examples: []string{appName + " keychain authorize --interactive"}},
 	{Command: "digest-source", Tool: "digest_source", Usage: appName + " digest-source <chat> [--since-last] [--data-root PATH] [--confirm-external-output]", Positional: "chat", Description: "Write an explicit private digest source package with live messages, freshness, cursor state, and provenance.", Examples: []string{appName + ` digest-source "$CHAT" --since-last`, appName + ` digest-source "$CHAT" --data-root ~/.wechat-cli/digests`}},
@@ -179,7 +180,7 @@ func maybeRunCLI(args []string) bool {
 		runToolCLI("read_os", flags, opts, args[0])
 		return true
 	case "keychain":
-		if len(args) < 2 || (args[1] != "status" && args[1] != "migrate" && args[1] != "authorize") {
+		if len(args) < 2 || (args[1] != "status" && args[1] != "migrate" && args[1] != "authorize" && args[1] != "handoff") {
 			runCLIHelp("keychain", opts)
 			return true
 		}
@@ -699,6 +700,8 @@ func runToolResult(name string, flags map[string]any, command string) (any, stri
 		result, err = srv.toolKeychainMigrate(flags)
 	case "keychain_authorize":
 		result, err = srv.toolKeychainAuthorize(flags)
+	case "keychain_handoff":
+		result, err = srv.toolKeychainHandoff(flags)
 	default:
 		err = fmt.Errorf("unknown cli tool %q", name)
 	}
@@ -1215,6 +1218,7 @@ func cliToolNames() []string {
 		"keychain_status",
 		"keychain_migrate",
 		"keychain_authorize",
+		"keychain_handoff",
 	}
 }
 

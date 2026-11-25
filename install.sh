@@ -43,6 +43,7 @@ LIB_SOURCE=""
 
 WATCHER_INSTALLED=0
 BOOTSTRAP_RAN=0
+KEYCHAIN_HANDOFF=0
 REFRESH_RAN=0
 ASR_RAN=0
 INSTALL_STATUS="ok"
@@ -724,6 +725,7 @@ install_components() {
       cp -pP "$INSTALL_DIR/$name" "$INSTALL_TRANSACTION_DIR/backup/$name" || die "backup installed component failed: $name" 1
     fi
   done
+  stage_keychain_handoff
   INSTALL_TRANSACTION_ACTIVE=1
   for name in "${INSTALL_TRANSACTION_FILES[@]}"; do
     if [[ -f "$staged/$name" ]]; then
@@ -735,6 +737,30 @@ install_components() {
   done
   INSTALL_TRANSACTION_ACTIVE=0
   cleanup_install_transaction
+  finish_keychain_handoff
+}
+
+# The Keychain item trusts only the binary that wrote it, and every ad-hoc
+# build is a new identity. Before the swap, the installed binary (which can
+# still read the item) stages the keys in config.json; right after, the new
+# binary stores them in its own item. No wxkey bootstrap, no WeChat restart.
+# Binaries before 2.0.6 lack the command and print help, hence the grep.
+stage_keychain_handoff() {
+  [[ "$(uname -s)" == "Darwin" && -x "$INSTALL_DIR/$APP_NAME" ]] || return 0
+  ensure_log_dir
+  if "$INSTALL_DIR/$APP_NAME" keychain handoff 2>>"$INSTALL_LOG" | grep -q '"status":"staged"'; then
+    KEYCHAIN_HANDOFF=1
+    ACTIONS+=("stage Keychain keys for the new binary")
+  fi
+}
+
+finish_keychain_handoff() {
+  [[ "$KEYCHAIN_HANDOFF" -eq 1 ]] || return 0
+  if "$INSTALL_DIR/$APP_NAME" keychain migrate 2>>"$INSTALL_LOG" | grep -q '"ok":true'; then
+    ACTIONS+=("move staged keys into the new binary's Keychain item")
+  else
+    warn "staged keys stay in config.json until the next wechat-cli read moves them into the Keychain"
+  fi
 }
 
 install_cli_shim() {

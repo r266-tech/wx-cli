@@ -300,3 +300,67 @@ func TestFreshPlaintextKeysInKeychainConfigAreUsedAndMigrated(t *testing.T) {
 		t.Fatalf("config after migration: %v", raw)
 	}
 }
+
+func TestKeychainHandoffRoundTripsThroughMigration(t *testing.T) {
+	t.Setenv("WECHAT_CLI_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	oldLoad, oldSave := runtimeKeyLoad, runtimeKeySave
+	t.Cleanup(func() { runtimeKeyLoad, runtimeKeySave = oldLoad, oldSave })
+	xor := 7
+	record := keystore.Record{SchemaVersion: 1, WxID: "fixture", DBRoot: "/fixture", Keys: map[string]string{"synthetic-salt": "synthetic-key"}, ImageKey: "synthetic-image", ImageXORKey: &xor, KeyEpoch: 4}
+	runtimeKeyLoad = func(string, string) (*keystore.Record, error) { r := record; return &r, nil }
+	runtimeKeySave = func(r keystore.Record) error { record = r; return nil }
+	if err := Save(&Config{SchemaVersion: 3, Wxid: "fixture", DBRoot: "/fixture", KeyStore: "keychain", KeyStoreRef: keystore.Account("/fixture", "fixture"), KeyEpoch: 4}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Old binary stages the keys.
+	n, err := StageKeychainHandoff()
+	if err != nil || n != 1 {
+		t.Fatalf("stage = %d, %v", n, err)
+	}
+	if meta, _ := LoadRuntimeKeyMetadata(); meta.Store != "config_legacy" {
+		t.Fatalf("staged config must read as fresh plaintext keys, got %q", meta.Store)
+	}
+	if again, err := StageKeychainHandoff(); err != nil || again != 1 {
+		t.Fatalf("restaging must be a no-op, got %d %v", again, err)
+	}
+
+	// New binary cannot read the old item; it migrates the staged keys.
+	runtimeKeyLoad = func(string, string) (*keystore.Record, error) { r := record; return &r, nil }
+	record = keystore.Record{}
+	res, err := MigratePersistentToKeychain(func(*Config) error { return nil })
+	if err != nil || !res.Migrated {
+		t.Fatalf("migration = %+v, %v", res, err)
+	}
+	if record.Keys["synthetic-salt"] != "synthetic-key" || record.ImageKey != "synthetic-image" || record.ImageXORKey == nil || *record.ImageXORKey != 7 || record.KeyEpoch != 4 {
+		t.Fatalf("new item lost data: %+v", record)
+	}
+	p, _ := Path()
+	b, _ := os.ReadFile(p)
+	if strings.Contains(string(b), "synthetic-key") || strings.Contains(string(b), "synthetic-image") {
+		t.Fatal("plaintext keys left in config after migration")
+	}
+	if loaded, err := Load(); err != nil || !loaded.Ready() {
+		t.Fatalf("load after handoff: %v", err)
+	}
+}
+
+func TestKeychainHandoffLeavesConfigWhenKeychainUnreadable(t *testing.T) {
+	t.Setenv("WECHAT_CLI_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+	oldLoad, oldSave := runtimeKeyLoad, runtimeKeySave
+	t.Cleanup(func() { runtimeKeyLoad, runtimeKeySave = oldLoad, oldSave })
+	runtimeKeySave = func(keystore.Record) error { return nil }
+	if err := Save(&Config{SchemaVersion: 3, Wxid: "fixture", DBRoot: "/fixture", KeyStore: "keychain", KeyStoreRef: keystore.Account("/fixture", "fixture")}); err != nil {
+		t.Fatal(err)
+	}
+	p, _ := Path()
+	before, _ := os.ReadFile(p)
+	runtimeKeyLoad = func(string, string) (*keystore.Record, error) { return nil, keystore.ErrInteractionRequired }
+	if _, err := StageKeychainHandoff(); err == nil {
+		t.Fatal("unreadable Keychain must fail")
+	}
+	after, _ := os.ReadFile(p)
+	if string(before) != string(after) {
+		t.Fatal("failed handoff changed config")
+	}
+}
