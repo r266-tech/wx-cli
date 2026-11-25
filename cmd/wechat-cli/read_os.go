@@ -439,6 +439,7 @@ func readOSCapabilities(dbReady, wcdbAvailable, cacheIndexExists bool) map[strin
 		"context":         liveRead,
 		"tail":            liveRead,
 		"media":           liveRead,
+		"image_originals": liveRead && locateFFmpeg() != "",
 		"voice_asr":       asrReadyBool(asrStatusData()["wechat_voice_ready"]),
 		"name_resolution": liveRead,
 	}

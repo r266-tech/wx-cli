@@ -1190,13 +1190,12 @@ func (s *server) queryLiveMessages(a map[string]any, order string) ([]wcdb.Row, 
 		rows, page.HasMore = sliceRowsWithHasMore(rows, offset, limit)
 	}
 	s.attachMessageDisplayNames(rows)
-	if selfWxid := s.selfWxid(); selfWxid != "" {
-		for _, r := range rows {
-			sw, _ := r["sender_wxid"].(string)
-			if sw != "" {
-				r["is_from_me"] = (sw == selfWxid)
-			}
+	selfWxid := s.selfWxid()
+	for _, r := range rows {
+		if sw, _ := r["sender_wxid"].(string); sw != "" && selfWxid != "" {
+			r["is_from_me"] = (sw == selfWxid)
 		}
+		markMessageMentions(r, selfWxid)
 	}
 	for _, r := range rows {
 		if sid := rowInt64(r, "server_id"); sid != 0 {
@@ -1387,6 +1386,11 @@ func agentMessageWithIndex(r wcdb.Row, sourceIndex map[string]wcdb.Row, includeD
 		"text":        agentMessageText(r),
 	}
 	addOptionalGroupIdentity(out, r)
+	for _, k := range []string{"mentions_me", "mentions_all"} {
+		if v, _ := r[k].(bool); v {
+			out[k] = true
+		}
+	}
 	if warnings := agentMessageWarnings(r); len(warnings) > 0 {
 		out["warnings"] = warnings
 	}

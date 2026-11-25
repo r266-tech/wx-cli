@@ -268,7 +268,8 @@ Agent-ready message rows include:
 
 `id(message_token/local_id/server_id_str/talker)`, `time`, `create_time`, `time_iso`, `sender`,
 `sender_wxid`, optional `sender_group_nickname` / `sender_contact_display`,
-`is_from_me`, `kind`, `text`, display-ready `images` / `videos` /
+`is_from_me`, `mentions_me` / `mentions_all` (group @ you / @all, only when
+true), `kind`, `text`, display-ready `images` / `videos` /
 `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` /
 `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and
 concise `warnings`.
@@ -281,6 +282,10 @@ WeChat and it affects understanding, return it by default. Implementation
 materials such as protocol codes, CDN/aeskey, raw XML, unreadable `.dat`, raw
 SILK, and duplicate candidate paths belong in `include_debug=true`,
 `fields=full`, or `media --debug`.
+
+Image refs flagged `thumbnail: true` (warning `image_thumbnail_only`) are small
+previews, not the picture. Most WeChat 4.x originals are WXGF and need `ffmpeg`;
+on `image_original_needs_ffmpeg`, run `brew install ffmpeg` and read again.
 
 Images/videos in agent view should expose directly readable local `path` values
 only. Voice rows are read from `media_0.db` / `VoiceInfo`; wechat-cli attempts

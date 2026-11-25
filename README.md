@@ -200,6 +200,12 @@ manifest、来源时间、key epoch 和每个数据库的 SHA-256，不改变实
 
 群消息优先使用可可靠解析的群内昵称作为 `sender`。`sender_wxid` 保留稳定身份，
 `sender_contact_display` 与 `sender_group_nickname` 仅在对应信息可可靠解析时返回。
+群消息里 @ 了你时带 `mentions_me: true`，@所有人 时带 `mentions_all: true`。
+
+图片默认给原图；微信 4.x 的原图多为 WXGF 格式，需要本机有 `ffmpeg`
+（`brew install ffmpeg`）才能转换。只拿得到缩略图时，图片带 `thumbnail: true`，
+消息带 `image_thumbnail_only` 警告；装上 ffmpeg 就能解决时，还会带
+`image_original_needs_ffmpeg`。
 
 默认只返回人能在微信里看到、且 agent 可直接使用的信息。raw XML、CDN key、协议码、不可读 `.dat` 与候选路径只在 debug/full 输出中出现。
 

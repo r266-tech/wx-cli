@@ -98,7 +98,7 @@ var cliCommandSpecs = []cliCommandSpec{
 	{Command: "search", Tool: "search", Usage: appName + " search <keyword> [--in <chat>] [--after 2026-01-01] [--type text]", Positional: "keyword", Examples: []string{appName + ` search "$KEYWORD" --in "$CHAT" --limit 10`}},
 	{Command: "search-context", Aliases: []string{"search_context", "search-with-context", "search_with_context"}, Tool: "search_with_context", Usage: appName + " search-context <keyword> [--in <chat>] [--before-count 5] [--after-count 5]", Positional: "keyword", Examples: []string{appName + ` search-context "$KEYWORD" --in "$CHAT" --limit 5`, appName + ` search-with-context "$KEYWORD" --context-limit 3 --before-count 10 --after-count 10`}},
 	{Command: "members", Aliases: []string{"group-members", "group_members"}, Tool: "group_members", Usage: appName + " members <group>", Positional: "chat", Examples: []string{appName + ` members "$CHAT" --limit 50`}},
-	{Command: "unread", Tool: "unread", Usage: appName + " unread [--limit 50]", Examples: []string{appName + " unread --limit 50"}},
+	{Command: "unread", Tool: "unread", Usage: appName + " unread [--type-filter private,group] [--limit 50]", Examples: []string{appName + " unread --type-filter private,group", appName + " unread --limit 50"}},
 	{Command: "stats", Tool: "stats", Usage: appName + " stats", Examples: []string{appName + " stats"}},
 	{Command: "favorites", Tool: "favorites", Usage: appName + " favorites [--limit 20]", Examples: []string{appName + " favorites --limit 20"}},
 	{Command: "red-packets", Aliases: []string{"red_packets"}, Tool: "red_packets", Usage: appName + " red-packets [--limit 20]", Examples: []string{appName + " red-packets --limit 20"}},
@@ -962,6 +962,11 @@ func cliSearchMessageRow(row map[string]any, args map[string]any) map[string]any
 		"text":  text,
 		"match": match,
 	})
+	// match is the raw hit; it only adds information when it differs from the
+	// display text, and repeating it doubles the tokens of every long hit.
+	if match == text {
+		delete(out, "match")
+	}
 	if !getBoolDefault(args, "include_text", true) {
 		delete(out, "text")
 		delete(out, "match")

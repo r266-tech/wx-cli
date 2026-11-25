@@ -362,8 +362,11 @@ func TestCLISearchMessageRowCanTrimText(t *testing.T) {
 		"content":             "不是ABCDEFG而是HIJKLMN",
 	}
 	got := cliSearchMessageRow(row, map[string]any{"snippet_only": true, "max_text_chars": int64(4)})
-	if got["text"] != "不是AB" || got["match"] != "不是AB" {
+	if got["text"] != "不是AB" {
 		t.Fatalf("trimmed row = %#v", got)
+	}
+	if _, ok := got["match"]; ok {
+		t.Fatalf("match identical to text must be omitted: %#v", got)
 	}
 	if got["text_truncated"] != true || got["original_text_chars"] == nil {
 		t.Fatalf("truncation metadata = %#v", got)
