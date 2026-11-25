@@ -66,7 +66,7 @@ func TestFavKind(t *testing.T) {
 		{2, "image"},
 		{5, "link"},
 		{14, "chat_history"},
-		{18, "miniprogram"},
+		{18, "note"},    // real type-18 favorites hold a WeNoteHtmlFile body,
 		{20, "unknown"}, // observed but undocumented
 		{99, "unknown"},
 	}

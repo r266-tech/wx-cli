@@ -600,7 +600,7 @@ func readOSCoverageMatrix() []map[string]any {
 		coverageRow("solitaire", "supported", "timeline/search", "display-ready app payload summary", "raw appmsg XML"),
 		coverageRow("miniprogram", "supported", "timeline/search", "title, app id/source, URL/thumb when present", "raw appmsg XML"),
 		coverageRow("card", "supported", "timeline/search", "shared contact/card display payload", "raw card XML"),
-		coverageRow("sticker", "supported_with_diagnostics", "timeline/media", "sticker summary and media hints when present", "raw emoji XML/media candidates"),
+		coverageRow("sticker", "supported", "timeline/media", "sticker image path from WeChat's emoticon cache or its md5-checked CDN copy", "raw emoji XML/media candidates"),
 		coverageRow("system_recall", "supported", "timeline/search", "system/recall text as visible in WeChat", "raw system content"),
 		coverageRow("group_members", "supported", "members", "username, display name, owner/friend flags", "member stats when requested"),
 		coverageRow("contact_labels", "supported", "contacts/labels", "contact labels as id/name refs and bidirectional contact filtering", "ContactInfo protobuf field 30 plus contact_label definitions"),

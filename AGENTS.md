@@ -301,13 +301,24 @@ Animated WXGF originals return their first frame at full size.
 `image_original_not_downloaded` / `video_not_downloaded` / `file_not_downloaded`
 mean WeChat has not fetched the media yet (it does so when opened); the file
 does not exist locally, so retrying will not help until it is opened in WeChat.
-Stickers come back as `images: [{path, sticker: true}]`, fetched once from the
-Tencent CDN URL in the message and checked against its md5 (Tencent hosts only,
-no redirects; off under `--strict-read-only` or `WECHAT_CLI_STICKER_FETCH=off`,
-which adds `sticker_fetch_disabled`). QQ mail pushes (`mail`), calls (`call`),
-Channels shares and lives (`channel_video`, `channel_live`), group
-announcements (`announcement.text`), WeChat gifts (`gift`) and WeCom cards
-(`card`) carry the sentence WeChat shows plus a small structured payload.
+Stickers (including large animated ones sent as attachments, app subtype 8)
+come back as `images: [{path, sticker: true}]`. They are decrypted from
+WeChat's own emoticon cache (AES-128-CBC, key = iv = md5("<uin><wxid>EMOTICON"),
+uin from kvcomm `key_<uin>_*` names) and, when only a WXGF copy or nothing is
+there, fetched once from the Tencent CDN URL in the message or in emoticon.db.
+Both paths must reproduce the sticker md5 (Tencent hosts only, no redirects;
+network errors retry on the next read, only definite rejections back off 6 h;
+off under `--strict-read-only` or `WECHAT_CLI_STICKER_FETCH=off`, which adds
+`sticker_fetch_disabled`). QQ mail pushes (`mail`), calls (`call`), Channels
+shares, lives, profile cards and topics (`channel_video`, `channel_live`,
+`channel_card`, `channel_topic`), group announcements (`announcement.text`),
+WeChat gifts (`gift`) and WeCom cards (`card`) carry the sentence WeChat shows
+plus a small structured payload. Transfers read `[转账] ￥X` / `[已收款] ￥X` /
+`[已退还] ￥X` with `transfer.status` sent / accepted / returned (WeChat's own
+des says 收到转账 to the payer too); red packets read `[红包] <wish>`.
+`red-packets` rows carry `time_iso`. `favorites` returns title, text and
+`items` (a saved chat line by line with sender and time; a note's paragraphs);
+the raw XML needs `--include-raw`.
 On `voice_asr_not_installed`, `wechat-cli asr setup` installs local voice
 transcription (no user input; downloads a speech model). A WeChat note (笔记)
 is `kind: note` with the same item list as `forward_chat`.

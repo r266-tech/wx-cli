@@ -108,6 +108,71 @@ func FavoriteInfo(content string) (title, desc, url string, err error) {
 	return
 }
 
+// FavoriteEntry is one item inside a favorite: a line of a saved chat, a
+// paragraph or picture of a note, or the single item of a plain favorite.
+type FavoriteEntry struct {
+	Type   string
+	Title  string
+	Text   string
+	Sender string
+	Time   string
+	Format string
+	Size   int64
+}
+
+type xmlFavDetail struct {
+	XMLName xml.Name `xml:"favitem"`
+	Title   string   `xml:"title"`
+	Desc    string   `xml:"desc"`
+	Items   []struct {
+		DataType string `xml:"datatype,attr"`
+		HTMLID   string `xml:"htmlid,attr"`
+		Title    string `xml:"datatitle"`
+		Desc     string `xml:"datadesc"`
+		SrcName  string `xml:"datasrcname"`
+		SrcTime  string `xml:"datasrctime"`
+		Fmt      string `xml:"datafmt"`
+		Size     int64  `xml:"fullsize"`
+	} `xml:"datalist>dataitem"`
+}
+
+var favDataTypes = map[string]string{
+	"1": "text", "2": "image", "3": "voice", "4": "video", "5": "link",
+	"6": "location", "8": "file", "17": "chat_history",
+}
+
+// FavoriteDetail returns a favorite's own title and text plus its items.
+// The HTML container a note keeps its body in is not an item.
+func FavoriteDetail(content string) (title, text string, entries []FavoriteEntry, err error) {
+	var f xmlFavDetail
+	if err = xml.Unmarshal([]byte(content), &f); err != nil {
+		return
+	}
+	for _, it := range f.Items {
+		if it.HTMLID == "WeNoteHtmlFile" {
+			continue
+		}
+		kind := favDataTypes[strings.TrimSpace(it.DataType)]
+		if kind == "" {
+			kind = "unknown"
+		}
+		e := FavoriteEntry{
+			Type:   kind,
+			Title:  strings.TrimSpace(it.Title),
+			Text:   strings.TrimSpace(it.Desc),
+			Sender: strings.TrimSpace(it.SrcName),
+			Time:   strings.TrimSpace(it.SrcTime),
+			Format: strings.TrimPrefix(strings.TrimSpace(it.Fmt), "."),
+			Size:   it.Size,
+		}
+		if kind != "text" && kind != "link" && kind != "location" && e.Text == e.Title {
+			e.Text = ""
+		}
+		entries = append(entries, e)
+	}
+	return strings.TrimSpace(f.Title), strings.TrimSpace(f.Desc), entries, nil
+}
+
 // xmlForwardMsg parses forward_chat (base_kind=49, subtype=19) messages.
 // recorditem wraps its recordinfo payload in CDATA; ,chardata reads it as
 // plain text (Go's xml parser auto-unwraps CDATA into character data), which
