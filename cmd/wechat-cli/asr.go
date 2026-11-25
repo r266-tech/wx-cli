@@ -169,6 +169,13 @@ func asrStatusData() map[string]any {
 	pysilkPython := findConfiguredPythonWithModule("pysilk")
 
 	asrReady := customCmd != "" || fasterPython != "" || (whisperCLI != "" && whisperModel != "")
+	engine := preferredVoiceEngine()
+	defaultModel, defaultDevice, defaultCompute := whisperModel, "", ""
+	if engine == "faster-whisper" {
+		defaultModel = firstNonEmpty(runtimeCfg.Model, defaultFasterWhisperModel)
+		defaultDevice = firstNonEmpty(runtimeCfg.Device, "cpu")
+		defaultCompute = firstNonEmpty(runtimeCfg.ComputeType, "int8")
+	}
 	silkReady := silkDecoder != "" || pysilkPython != ""
 	warnings := []string{}
 	if !asrReady {
@@ -190,11 +197,11 @@ func asrStatusData() map[string]any {
 	return compactMap(map[string]any{
 		"ready":                 asrReady,
 		"wechat_voice_ready":    asrReady && silkReady,
-		"default_engine":        preferredVoiceEngine(),
-		"default_model":         firstNonEmpty(runtimeCfg.Model, defaultFasterWhisperModel),
+		"default_engine":        engine,
+		"default_model":         defaultModel,
 		"default_language":      firstNonEmpty(runtimeCfg.Language, "zh"),
-		"default_device":        firstNonEmpty(runtimeCfg.Device, "cpu"),
-		"default_compute_type":  firstNonEmpty(runtimeCfg.ComputeType, "int8"),
+		"default_device":        defaultDevice,
+		"default_compute_type":  defaultCompute,
 		"state_venv":            venv,
 		"state_venv_python":     venvPython,
 		"custom_transcriber":    customCmd,
@@ -205,7 +212,7 @@ func asrStatusData() map[string]any {
 		"pysilk_python":         pysilkPython,
 		"warnings":              warnings,
 		"next_action":           next,
-		"setup_command":         appName + " asr setup --model " + defaultFasterWhisperModel,
+		"setup_command":         appName + " asr setup",
 	})
 }
 
@@ -273,20 +280,18 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 		actions = append([]string{"remove existing managed ASR virtualenv at " + venv}, actions...)
 	}
 	if opts.DryRun {
-		return compactMap(map[string]any{
+		out := map[string]any{
 			"dry_run":             true,
 			"ready":               false,
 			"venv":                venv,
 			"python":              python,
 			"venv_python":         venvPython,
-			"model":               opts.Model,
-			"language":            opts.Language,
-			"device":              opts.Device,
-			"compute_type":        opts.ComputeType,
 			"skip_model_download": opts.SkipModelDownload,
 			"actions":             actions,
-			"next_action":         appName + " asr setup --model " + opts.Model,
-		}), nil
+			"next_action":         appName + " asr setup",
+		}
+		addASREngineFields(out, gpuWhisper, opts)
+		return compactMap(out), nil
 	}
 
 	if opts.Force {
@@ -340,21 +345,34 @@ func asrSetup(opts asrSetupOptions) (map[string]any, error) {
 	if !asrReadyBool(status["ready"]) || !asrReadyBool(status["wechat_voice_ready"]) {
 		return nil, fmt.Errorf("ASR postflight failed: %v", status["warnings"])
 	}
-	return compactMap(map[string]any{
+	out := map[string]any{
 		"dry_run":             false,
 		"ready":               status["ready"],
 		"wechat_voice_ready":  status["wechat_voice_ready"],
 		"venv":                venv,
 		"venv_python":         venvPython,
-		"model":               opts.Model,
-		"language":            opts.Language,
-		"device":              opts.Device,
-		"compute_type":        opts.ComputeType,
 		"skip_model_download": opts.SkipModelDownload,
 		"actions":             actions,
 		"warnings":            status["warnings"],
 		"next_action":         status["next_action"],
-	}), nil
+	}
+	addASREngineFields(out, gpuWhisper, opts)
+	return compactMap(out), nil
+}
+
+// addASREngineFields reports the engine that will actually transcribe:
+// whisper.cpp ignores the faster-whisper model/device/compute settings.
+func addASREngineFields(out map[string]any, gpuWhisper bool, opts asrSetupOptions) {
+	out["language"] = opts.Language
+	if gpuWhisper {
+		out["engine"] = "whisper.cpp"
+		out["model"] = firstNonEmpty(findWhisperModel(), filepath.Join(whisperCPPModelDir(), whisperCPPModelName))
+		return
+	}
+	out["engine"] = "faster-whisper"
+	out["model"] = opts.Model
+	out["device"] = opts.Device
+	out["compute_type"] = opts.ComputeType
 }
 
 func validateASRForceVenv(path string) error {

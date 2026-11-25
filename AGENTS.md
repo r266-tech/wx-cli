@@ -62,8 +62,11 @@ Release zip contents:
   `scripts/install-release.ps1`
 - Optional voice ASR is not bundled into the default release. Users explicitly
   opt in with installer `--with-asr` / `-WithASR` or `wechat-cli asr setup`.
-  Setup creates `~/.wechat-cli/asr-venv`, installs `faster-whisper` and
-  `silk-python`, and preloads `large-v3` unless `--skip-model-download` is set.
+  On macOS, setup installs Homebrew `whisper-cpp` (Apple GPU), downloads and
+  SHA-256-checks `ggml-large-v3-turbo-q5_0.bin` into `~/.cache/whisper-cpp`,
+  and installs `silk-python` into `~/.wechat-cli/asr-venv`. Other platforms
+  install `faster-whisper` (with `av<19`) and preload `large-v3`.
+  `--skip-model-download` skips the model.
 
 ## Runtime Facts
 
@@ -295,14 +298,27 @@ Image refs flagged `thumbnail: true` (warning `image_thumbnail_only`) are small
 previews, not the picture. Most WeChat 4.x originals are WXGF and need `ffmpeg`;
 on `image_original_needs_ffmpeg`, run `brew install ffmpeg` and read again.
 Animated WXGF originals return their first frame at full size.
+`image_original_not_downloaded` / `video_not_downloaded` / `file_not_downloaded`
+mean WeChat has not fetched the media yet (it does so when opened); the file
+does not exist locally, so retrying will not help until it is opened in WeChat.
+Stickers come back as `images: [{path, sticker: true}]`, fetched once from the
+Tencent CDN URL in the message and checked against its md5 (Tencent hosts only,
+no redirects; off under `--strict-read-only` or `WECHAT_CLI_STICKER_FETCH=off`,
+which adds `sticker_fetch_disabled`). QQ mail pushes (`mail`), calls (`call`),
+Channels shares and lives (`channel_video`, `channel_live`), group
+announcements (`announcement.text`), WeChat gifts (`gift`) and WeCom cards
+(`card`) carry the sentence WeChat shows plus a small structured payload.
 On `voice_asr_not_installed`, `wechat-cli asr setup` installs local voice
 transcription (no user input; downloads a speech model). A WeChat note (笔记)
 is `kind: note` with the same item list as `forward_chat`.
 
 Images/videos in agent view should expose directly readable local `path` values
-only. Voice rows are read from `media_0.db` / `VoiceInfo`; wechat-cli attempts
-local transcription with `faster-whisper large-v3` first and returns
-`voice.transcript` by default. If no external `silk_v3_decoder` exists, the
+only. Voice rows are read from every `media_N.db` / `VoiceInfo`; wechat-cli
+transcribes with whisper.cpp when `whisper-cli` and a ggml model exist, else
+`faster-whisper`, and returns `voice.transcript` by default. One read spends
+at most 25 s transcribing (`WECHAT_CLI_VOICE_BUDGET_SECONDS`); the rest report
+`voice_transcription_pending` and are transcribed on a later read. A failure
+is not retried by the same engine for an hour. If no external `silk_v3_decoder` exists, the
 ASR venv's `pysilk` module is the fallback SILK decoder. Raw SILK/WAV paths
 stay in debug/media output.
 

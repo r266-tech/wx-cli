@@ -1552,7 +1552,11 @@ func TestASRSetupDryRunUsesStateVenv(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantVenv := filepath.Join(stateDir, "asr-venv")
-	if got["dry_run"] != true || got["venv"] != wantVenv || got["model"] != "large-v3" {
+	wantEngine, wantModel := "faster-whisper", any("large-v3")
+	if runtime.GOOS == "darwin" {
+		wantEngine, wantModel = "whisper.cpp", got["model"]
+	}
+	if got["dry_run"] != true || got["venv"] != wantVenv || got["engine"] != wantEngine || got["model"] != wantModel || got["model"] == "" {
 		t.Fatalf("dry-run setup = %#v", got)
 	}
 	if _, err := os.Stat(wantVenv); !errors.Is(err, os.ErrNotExist) {

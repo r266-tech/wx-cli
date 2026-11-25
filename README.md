@@ -212,6 +212,10 @@ manifest、来源时间、key epoch 和每个数据库的 SHA-256，不改变实
 消息带 `image_thumbnail_only` 警告；装上 ffmpeg 就能解决时，还会带
 `image_original_needs_ffmpeg`。动图原图给第一帧的全尺寸图；第一帧也解不出来时才退回缩略图。
 
+表情包给 `images: [{"path": …, "sticker": true}]`：微信本地的表情缓存是加密的，wechat-cli 从消息里自带的腾讯 CDN 地址下载一次，校验 md5 后缓存在 `~/.wechat-cli/media-cache`。只连接腾讯域名、不跟随跳转；`--strict-read-only` 或 `WECHAT_CLI_STICKER_FETCH=off` 时不联网，消息带 `sticker_fetch_disabled`。
+微信只在点开时才下载原图、视频和文件。还没下载的会分别带 `image_original_not_downloaded`、`video_not_downloaded`、`file_not_downloaded` 警告，这表示文件本身还不存在，不是解码失败。
+QQ 邮件提醒（`mail`）、通话（`call`）、视频号（`channel_video`）与视频号直播（`channel_live`）、群公告（`announcement.text`）、微信礼物（`gift`）、企业微信名片（`card`）都给出微信界面上的那句话，以及一个小的结构化字段。
+
 `sessions` / `unread` 行不再带 `last_msg_type` / `last_msg_sub_type` 原始类型码（看 `last_msg_kind_name`），
 `sort_timestamp` 只在和 `last_timestamp` 不同时返回。
 
@@ -241,11 +245,12 @@ WECHAT_CLI_STRICT_READ_ONLY=1 wechat-cli agent --pretty
 语音转写是可选能力：
 
 ```bash
-wechat-cli asr setup --model large-v3
+wechat-cli asr setup
 wechat-cli asr status --pretty
 ```
 
-它会创建 `~/.wechat-cli/asr-venv`，安装 `faster-whisper` 与 `silk-python`。模型、语言、device 与 compute type 会持久化到本机 ASR 配置。首次模型下载可能占用数 GB；只安装依赖可加 `--skip-model-download`。
+macOS 上它会用 Homebrew 安装 `whisper-cpp`（走 Apple GPU），下载并校验 `ggml-large-v3-turbo-q5_0.bin`（574 MB，放在 `~/.cache/whisper-cpp`），再在 `~/.wechat-cli/asr-venv` 里装 `silk-python` 解码微信语音；一条 10 秒语音几秒就能转完。其他平台仍用 `faster-whisper`。只安装依赖不下载模型，可加 `--skip-model-download`。
+一次读取最多花 25 秒做转写（`WECHAT_CLI_VOICE_BUDGET_SECONDS`）；超出的语音带 `voice_transcription_pending`，下次读取接着转。转写失败的语音一小时内不会重试。
 
 ## 更新与清理
 
