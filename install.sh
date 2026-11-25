@@ -106,9 +106,10 @@ Install options:
   --refresh                 Start wechat-cli metadata cache refresh after installing binaries.
                             Defaults to background warmup; set
                             WECHAT_CLI_INSTALL_SYNC_REFRESH=1 for foreground wait.
-  --with-asr                Install optional local voice transcription runtime
-                            under ~/.wechat-cli/asr-venv and preload
-                            faster-whisper large-v3.
+  --with-asr                Install optional local voice transcription:
+                            whisper-cpp (Homebrew) plus the 574 MB
+                            large-v3-turbo model, and silk-python under
+                            ~/.wechat-cli/asr-venv.
   --watcher                 Install launchd cache watcher (5-min periodic
                             metadata cache refresh). WARNING: on macOS 15+ each refresh
                             triggers a "wechat-cli wants to access another app's
