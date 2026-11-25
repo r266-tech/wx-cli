@@ -440,7 +440,7 @@ func firstKeySetupAction() string {
 	if runtime.GOOS == "windows" {
 		return "Run " + readOSBootstrapCommand() + " with WeChat logged in, then rerun the read command."
 	}
-	return "Run " + readOSBootstrapCommand() + " with WeChat logged in; it needs no user input and briefly restarts WeChat. Then rerun the read command."
+	return "Run " + readOSBootstrapCommand() + " with WeChat logged in. It briefly restarts WeChat; on first run macOS shows the user one admin-password prompt, which is stored and not asked again. Then rerun the read command."
 }
 
 func readOSBootstrapCommand() string {
