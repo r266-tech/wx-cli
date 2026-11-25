@@ -275,7 +275,7 @@ func (s *server) findContextAnchorRow(shards []msgShardDB, tableName string, ref
 			rowInt64(row, "sort_seq") != rowInt64(rows[0], "sort_seq") ||
 			rowInt64(row, "create_time") != rowInt64(rows[0], "create_time") ||
 			rowString(row, "_message_shard") != rowString(rows[0], "_message_shard") {
-			return nil, fmt.Errorf("anchor message is ambiguous across message shards for %s; pass its message_token or an unambiguous server_id_str together with local_id", ref.Kind)
+			return nil, fmt.Errorf("message_anchor_ambiguous: anchor message is ambiguous across message shards for %s; pass its message_token or an unambiguous server_id_str together with local_id", ref.Kind)
 		}
 	}
 	return rows[0], nil
