@@ -236,7 +236,16 @@ func (s *server) readOSStatus(includeDebug bool) map[string]any {
 	cfg, cfgErr := s.activeConfigNoSetup()
 	if cfgErr != nil {
 		status["config_error"] = cfgErr.Error()
-		setBlocked("config_error", firstKeySetupAction(), readOSBootstrapCommand(), appName+" status --pretty")
+		if isKeychainLoadError(cfgErr) {
+			// The keys exist but this binary cannot read the Keychain item
+			// (typically written by an earlier version); say so precisely.
+			code := keychainDiagnosticCode(cfgErr)
+			status["key_store"] = "keychain"
+			advice := cliErrorAdvice(code, "", "read_os", "status")
+			setBlocked(code, advice.NextAction, advice.SuggestedCommands...)
+		} else {
+			setBlocked("config_error", firstKeySetupAction(), readOSBootstrapCommand(), appName+" status --pretty")
+		}
 	} else {
 		if cfg.KeyStore == "keychain" {
 			status["key_store"] = "keychain"

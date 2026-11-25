@@ -54,6 +54,17 @@ func (s *server) toolKeychainStatus(a map[string]any) (any, error) {
 	return data, nil
 }
 
+// isKeychainLoadError reports whether err comes from reading the Keychain
+// runtime item, as opposed to a missing or malformed config.
+func isKeychainLoadError(err error) bool {
+	for _, known := range []error{keystore.ErrInteractionRequired, keystore.ErrAuthorizationDenied, keystore.ErrItemNotFound, keystore.ErrUnavailable} {
+		if errors.Is(err, known) {
+			return true
+		}
+	}
+	return false
+}
+
 func keychainDiagnosticCode(err error) string {
 	switch {
 	case errors.Is(err, keystore.ErrInteractionRequired):
