@@ -85,7 +85,8 @@ def main():
             checks[name]={'status':'blocked','warning_codes':['keychain_access_required']}
         return finish(a,version,checks)
     # Discovery data is never written to disk or stdout.
-    sessions=call('sessions',{'limit':10})['sessions']
+    # Folded entries (folded groups, official accounts) have no messages of their own.
+    sessions=call('sessions',{'limit':10,'type_filter':'private,group'})['sessions']
     if not sessions:raise ValueError('no sessions')
     checks['sessions']={'status':'passed','count':len(sessions)}
     chat=sessions[0]['username']
