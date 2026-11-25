@@ -4123,32 +4123,52 @@ func (s *server) decodeLocalImageForAgent(path string, siblingPaths []string) ma
 	if strings.ToLower(filepath.Ext(path)) != ".dat" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return map[string]any{
-			"decode_status": "decode_failed",
-			"decode_error":  err.Error(),
-		}
-	}
-	decoded, ext, meta, status, err := s.decodeWechatImageDAT(data, siblingPaths)
 	out := map[string]any{}
-	for k, v := range meta {
-		out[k] = v
-	}
-	if err != nil {
-		out["decode_status"] = status
-		out["decode_error"] = err.Error()
-		return out
-	}
-	decodedPath, err := s.writeDecodedMediaCache(path, decoded, ext)
-	if err != nil {
-		if strings.Contains(err.Error(), "strict_read_only") {
-			out["decode_status"] = "strict_read_only"
-		} else {
-			out["decode_status"] = "decode_failed"
+	var decoded []byte
+	var decodedPath string
+	// A WXGF original is converted by ffmpeg; reuse the result keyed by the
+	// source file so a read does not spawn ffmpeg per image every time.
+	convertedPath := s.wxgfConversionCachePath(path)
+	if convertedPath != "" {
+		if b, err := os.ReadFile(convertedPath); err == nil && imageExtForData(b) == "jpg" {
+			decoded, decodedPath = b, convertedPath
+			out["source_format"] = "wxgf"
+			out["converter"] = "ffmpeg"
 		}
-		out["decode_error"] = err.Error()
-		return out
+	}
+	if decodedPath == "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return map[string]any{
+				"decode_status": "decode_failed",
+				"decode_error":  err.Error(),
+			}
+		}
+		var ext, status string
+		var meta map[string]any
+		decoded, ext, meta, status, err = s.decodeWechatImageDAT(data, siblingPaths)
+		for k, v := range meta {
+			out[k] = v
+		}
+		if err != nil {
+			out["decode_status"] = status
+			out["decode_error"] = err.Error()
+			return out
+		}
+		if meta["source_format"] == "wxgf" && convertedPath != "" {
+			decodedPath, err = writeMediaCacheFile(convertedPath, decoded)
+		} else {
+			decodedPath, err = s.writeDecodedMediaCache(path, decoded, ext)
+		}
+		if err != nil {
+			if strings.Contains(err.Error(), "strict_read_only") {
+				out["decode_status"] = "strict_read_only"
+			} else {
+				out["decode_status"] = "decode_failed"
+			}
+			out["decode_error"] = err.Error()
+			return out
+		}
 	}
 	out["decode_status"] = "decoded"
 	out["decoded_path"] = decodedPath
@@ -4513,6 +4533,41 @@ func (s *server) writeDecodedMediaCache(srcPath string, data []byte, ext string)
 		return "", fmt.Errorf("strict_read_only: decoded media cache write is disabled")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	if err := atomicPrivateWrite(dst, data); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+// wxgfConversionCachePath names the converted JPEG after the source file's
+// path, size and mtime, so a changed source is converted again.
+func (s *server) wxgfConversionCachePath(srcPath string) string {
+	st, err := os.Stat(srcPath)
+	if err != nil || st.IsDir() {
+		return ""
+	}
+	dir, err := s.mediaDecodeCacheDir()
+	if err != nil {
+		return ""
+	}
+	base := safeCacheID(strings.TrimSuffix(filepath.Base(srcPath), filepath.Ext(srcPath)))
+	if base == "" {
+		base = "media"
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("wxgf|%s|%d|%d", srcPath, st.Size(), st.ModTime().UnixNano())))
+	return filepath.Join(dir, fmt.Sprintf("%s-%s.jpg", base, hex.EncodeToString(sum[:8])))
+}
+
+func writeMediaCacheFile(dst string, data []byte) (string, error) {
+	if len(data) == 0 {
+		return "", fmt.Errorf("decoded media is empty")
+	}
+	if strictReadOnlyMode() {
+		return "", fmt.Errorf("strict_read_only: decoded media cache write is disabled")
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return "", err
 	}
 	if err := atomicPrivateWrite(dst, data); err != nil {

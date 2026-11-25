@@ -126,12 +126,14 @@ func TestAutoMigrateLegacyKeysSkipsWhenNothingToDo(t *testing.T) {
 
 func TestToolErrorCodeReadsMachinePrefix(t *testing.T) {
 	for msg, want := range map[string]string{
-		"db_keys_missing: no schema-2 DB keys cached":    "db_keys_missing",
-		"invalid_argument: \"x\" is a folder session":    "invalid_argument",
-		"message_cursor_stale: original message is gone": "message_cursor_stale",
-		"message_anchor_ambiguous: local_id repeats":     "message_anchor_ambiguous",
-		"table Msg_x not found in 8 message shards":      "tool_error",
-		"db_keys_missing without colon is not a code":    "tool_error",
+		"db_keys_missing: no schema-2 DB keys cached":        "db_keys_missing",
+		"chat_ambiguous: \"维尼\" matches a (wxid_a, private)": "chat_ambiguous",
+		"chat_not_found: no chat or contact matches \"x\"":   "chat_not_found",
+		"invalid_argument: \"x\" is a folder session":        "invalid_argument",
+		"message_cursor_stale: original message is gone":     "message_cursor_stale",
+		"message_anchor_ambiguous: local_id repeats":         "message_anchor_ambiguous",
+		"table Msg_x not found in 8 message shards":          "tool_error",
+		"db_keys_missing without colon is not a code":        "tool_error",
 	} {
 		if got := toolErrorCode(errors.New(msg)); got != want {
 			t.Errorf("toolErrorCode(%q)=%q, want %q", msg, got, want)
@@ -145,5 +147,13 @@ func TestKeychainLoadErrorIsRecognisedThroughWrapping(t *testing.T) {
 	}
 	if isKeychainLoadError(errors.New("config.json: unexpected end of JSON input")) {
 		t.Fatal("config parse error must not be reported as a Keychain problem")
+	}
+}
+
+func TestEveryHelpCommandHasDescription(t *testing.T) {
+	for _, c := range cliCommandSpecs {
+		if strings.TrimSpace(c.Description) == "" {
+			t.Errorf("command %q has no description; agents read help to pick a command", c.Command)
+		}
 	}
 }

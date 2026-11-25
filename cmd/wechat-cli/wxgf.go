@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,7 +18,7 @@ import (
 // many small ones.
 
 var (
-	errWXGFNeedsFFmpeg = errors.New("WXGF original image needs ffmpeg to convert; install it with `brew install ffmpeg` (no user input needed), then retry")
+	errWXGFNeedsFFmpeg = errors.New("WXGF original image needs ffmpeg to convert; install ffmpeg (macOS: `brew install ffmpeg`, no user input needed), then read again")
 	errWXGFAnimated    = errors.New("animated WXGF image is not converted; the thumbnail is returned")
 )
 
@@ -72,20 +73,25 @@ var (
 )
 
 // findFFmpeg also checks the Homebrew prefixes because agents often run with
-// a minimal PATH that omits them.
+// a minimal PATH that omits them. WECHAT_CLI_FFMPEG=off disables conversion.
 func findFFmpeg() string {
 	ffmpegOnce.Do(func() {
-		candidates := []string{os.Getenv("WECHAT_CLI_FFMPEG")}
-		if p, err := exec.LookPath("ffmpeg"); err == nil {
-			candidates = append(candidates, p)
-		}
-		candidates = append(candidates, "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
-		for _, p := range candidates {
-			if p == "" {
-				continue
+		if env := strings.TrimSpace(os.Getenv("WECHAT_CLI_FFMPEG")); env != "" {
+			if strings.EqualFold(env, "off") {
+				return
 			}
-			if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			if p, err := exec.LookPath(env); err == nil {
 				ffmpegPath = p
+				return
+			}
+		}
+		if p, err := exec.LookPath("ffmpeg"); err == nil {
+			ffmpegPath = p
+			return
+		}
+		for _, p := range []string{"/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"} {
+			if found, err := exec.LookPath(p); err == nil {
+				ffmpegPath = found
 				return
 			}
 		}
