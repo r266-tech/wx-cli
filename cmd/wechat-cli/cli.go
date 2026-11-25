@@ -33,12 +33,31 @@ type cliErrorEnvelope struct {
 }
 
 type cliError struct {
-	Code              string   `json:"code"`
-	Message           string   `json:"message"`
-	Tool              string   `json:"tool,omitempty"`
-	Command           string   `json:"command,omitempty"`
-	NextAction        string   `json:"next_action,omitempty"`
-	SuggestedCommands []string `json:"suggested_commands,omitempty"`
+	Code              string              `json:"code"`
+	Message           string              `json:"message"`
+	Tool              string              `json:"tool,omitempty"`
+	Command           string              `json:"command,omitempty"`
+	NextAction        string              `json:"next_action,omitempty"`
+	SuggestedCommands []string            `json:"suggested_commands,omitempty"`
+	Candidates        []cliErrorCandidate `json:"candidates,omitempty"`
+}
+
+type cliErrorCandidate struct {
+	ID          string `json:"id"`
+	DisplayName string `json:"display_name"`
+	ChatType    string `json:"chat_type"`
+}
+
+func cliErrorCandidates(err error) []cliErrorCandidate {
+	var amb *chatAmbiguousError
+	if !errors.As(err, &amb) {
+		return nil
+	}
+	out := make([]cliErrorCandidate, 0, len(amb.Candidates))
+	for _, c := range amb.Candidates {
+		out = append(out, cliErrorCandidate{ID: c.Username, DisplayName: c.DisplayName, ChatType: c.ChatType})
+	}
+	return out
 }
 
 type cliCommandSpec struct {
@@ -560,12 +579,37 @@ func runCacheCLI(args []string, opts cliOptions) {
 func runToolCLI(name string, flags map[string]any, opts cliOptions, command string) {
 	data, errCode, err := runToolResult(name, flags, command)
 	if err != nil {
-		exitCLIError(opts, 1, errCode, err.Error(), name, command)
+		exitCLIErrorWithCandidates(opts, 1, errCode, err.Error(), name, command, cliErrorCandidates(err))
 	}
 	writeCLISuccess(name, command, data, opts)
 }
 
+// cliShorthandFlags maps flags agents reach for first onto the schema names,
+// so `context CHAT --local-id 1 --before 5` works instead of failing.
+var cliShorthandFlags = map[string]map[string]string{
+	"message_context": {"before": "before_count", "after": "after_count"},
+}
+
+func applyCLIShorthand(name string, flags map[string]any) {
+	for short, full := range cliShorthandFlags[name] {
+		v, ok := flags[short]
+		if !ok {
+			continue
+		}
+		if str, isStr := v.(string); isStr {
+			if n, err := strconv.ParseInt(str, 10, 64); err == nil {
+				v = n
+			}
+		}
+		if _, exists := flags[full]; !exists {
+			flags[full] = v
+		}
+		delete(flags, short)
+	}
+}
+
 func runToolResult(name string, flags map[string]any, command string) (any, string, error) {
+	applyCLIShorthand(name, flags)
 	if err := validateToolArgs(name, flags); err != nil {
 		return nil, cliErrorCode(err), err
 	}
@@ -744,7 +788,7 @@ func runTailCLI(flags map[string]any, opts cliOptions, command string) {
 	for {
 		result, err := srv.toolReadEvents(flags)
 		if err != nil {
-			exitCLIError(opts, 1, "tool_error", err.Error(), "read_events", command)
+			exitCLIErrorWithCandidates(opts, 1, toolErrorCode(err), err.Error(), "read_events", command, cliErrorCandidates(err))
 		}
 		env, _ := result.(map[string]any)
 		if err := writeReadEventsJSONL(enc, env); err != nil {
@@ -1192,6 +1236,10 @@ func writeCLISuccess(tool, command string, data any, opts cliOptions) {
 }
 
 func exitCLIError(opts cliOptions, code int, errCode, message, tool, command string) {
+	exitCLIErrorWithCandidates(opts, code, errCode, message, tool, command, nil)
+}
+
+func exitCLIErrorWithCandidates(opts cliOptions, code int, errCode, message, tool, command string, candidates []cliErrorCandidate) {
 	message = diagnostics.Redact(message)
 	advice := cliErrorAdvice(errCode, message, tool, command)
 	writeJSONCLI(cliErrorEnvelope{
@@ -1203,6 +1251,7 @@ func exitCLIError(opts cliOptions, code int, errCode, message, tool, command str
 			Command:           command,
 			NextAction:        advice.NextAction,
 			SuggestedCommands: advice.SuggestedCommands,
+			Candidates:        candidates,
 		},
 	}, opts)
 	os.Exit(code)
@@ -1228,7 +1277,7 @@ func cliErrorAdvice(errCode, message, tool, command string) cliAdvice {
 		}
 	case "chat_ambiguous":
 		return cliAdvice{
-			NextAction:        "The name matches several chats; error.message lists each candidate's id. Pick the one the user means and retry with that id.",
+			NextAction:        "The name matches several chats; error.candidates lists each one's id, display_name and chat_type. Pick the one the user means and retry with that id.",
 			SuggestedCommands: []string{appName + ` resolve-chat "$CHAT"`},
 		}
 	case "chat_not_found":

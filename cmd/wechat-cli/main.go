@@ -1627,20 +1627,7 @@ func agentMessageWarnings(r wcdb.Row) []string {
 }
 
 func agentSystemText(raw string) string {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || !strings.Contains(raw, "<sysmsg") {
-		return raw
-	}
-	type revokeMsg struct {
-		Content string `xml:"revokemsg>content"`
-	}
-	var parsed revokeMsg
-	if err := xml.Unmarshal([]byte(raw), &parsed); err == nil {
-		if content := strings.TrimSpace(parsed.Content); content != "" {
-			return content
-		}
-	}
-	return raw
+	return renderSystemText(raw)
 }
 
 func agentQuote(r wcdb.Row, sourceIndex map[string]wcdb.Row) map[string]any {
@@ -2576,7 +2563,64 @@ func agentFileRefs(r wcdb.Row, referenced bool) ([]map[string]any, []string) {
 			refs = append(refs, meta)
 		}
 	}
+	if !referenced {
+		refs = keepDeclaredSizeFileRefs(refs, agentDeclaredFile(r))
+	}
 	return dedupeAgentFileRefs(refs), warnings
+}
+
+// WeChat saves same-named files from different messages into one folder as
+// name(1).ext, name(2).ext, so a name match can pick up another message's
+// file. The message declares its file size; keep the refs that match it and
+// put the exact-name one first. If none match, keep them all.
+func keepDeclaredSizeFileRefs(refs []map[string]any, meta map[string]any) []map[string]any {
+	declared, ok := integerArgValue(meta["file_size"])
+	if !ok || declared <= 0 || len(refs) <= 1 {
+		return refs
+	}
+	name := fmt.Sprint(meta["name"])
+	var exact, rest []map[string]any
+	for _, ref := range refs {
+		size, ok := integerArgValue(ref["file_size"])
+		if !ok || size != declared {
+			continue
+		}
+		if fmt.Sprint(ref["name"]) == name {
+			exact = append(exact, ref)
+		} else {
+			rest = append(rest, ref)
+		}
+	}
+	if len(exact)+len(rest) == 0 {
+		return refs
+	}
+	return append(exact, rest...)
+}
+
+// agentDeclaredFile is the message's own file name and size: the appmsg
+// total_len, else the resource database's record for this message
+// (media_resources on timeline rows, resources on media rows).
+func agentDeclaredFile(r wcdb.Row) map[string]any {
+	meta := agentFileMetadata(r)
+	if _, ok := integerArgValue(meta["file_size"]); ok {
+		return meta
+	}
+	var resources []map[string]any
+	resources = append(resources, mapSliceAny(r["media_resources"])...)
+	resources = append(resources, mapSliceAny(r["resources"])...)
+	for _, res := range resources {
+		if rowString(wcdb.Row(res), "resource_family") != "file" {
+			continue
+		}
+		if size, ok := integerArgValue(res["size"]); ok && size > 0 {
+			meta["file_size"] = size
+			if meta["name"] == nil {
+				meta["name"] = rowString(wcdb.Row(res), "file_name")
+			}
+			return meta
+		}
+	}
+	return meta
 }
 
 func agentFileMetadata(r wcdb.Row) map[string]any {
@@ -2948,6 +2992,16 @@ func firstNonZeroInt64(vals ...int64) int64 {
 // WeChat saves a re-downloaded file as "name(2).ext" next to "name.ext".
 var wechatDuplicateSuffix = regexp.MustCompile(`\(\d+\)(\.[^.()]*)?$`)
 
+func stripWechatDuplicateSuffixes(name string) string {
+	for {
+		next := wechatDuplicateSuffix.ReplaceAllString(name, "$1")
+		if next == name {
+			return name
+		}
+		name = next
+	}
+}
+
 func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
 	if len(refs) <= 1 {
 		return refs
@@ -2956,7 +3010,7 @@ func dedupeAgentFileRefs(refs []map[string]any) []map[string]any {
 	seen := map[string]bool{}
 	for _, ref := range refs {
 		if ref["name"] != nil || ref["file_size"] != nil {
-			key := fmt.Sprintf("%v\x00%v", wechatDuplicateSuffix.ReplaceAllString(fmt.Sprint(ref["name"]), "$1"), ref["file_size"])
+			key := fmt.Sprintf("%v\x00%v", stripWechatDuplicateSuffixes(fmt.Sprint(ref["name"])), ref["file_size"])
 			if seen[key] {
 				continue
 			}
@@ -8726,7 +8780,7 @@ func contentSummary(baseKind, subtype int32, raw string, parsed any, senderOpt .
 	case 50:
 		return "[通话]"
 	case 10000:
-		return raw
+		return renderSystemText(raw)
 	}
 	return fmt.Sprintf("[未知类型 base_kind=%d]", baseKind)
 }

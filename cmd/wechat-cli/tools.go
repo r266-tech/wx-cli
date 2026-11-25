@@ -810,7 +810,7 @@ var toolDefs = []toolDef{
 	},
 	{
 		Name:        "unread",
-		Description: "未读会话列表. live session DB; 字段同 sessions, 仅返回 unread_count > 0. 默认含公众号与折叠入口; 只看真人用 type_filter=private,group. 群消息里 mentions_me/mentions_all 标出 @ 我 / @所有人 (见 timeline).",
+		Description: "未读会话列表. live session DB; 字段同 sessions, 仅返回 unread_count > 0. 默认含公众号与折叠入口; 只看真人用 type_filter=private,group. 会话行不含逐条消息; 要知道哪个群 @ 了我, 对未读群调用 timeline --limit <unread_count>, 看消息上的 mentions_me/mentions_all.",
 		InputSchema: jsonSchema(props{
 			"limit":       intProp("返回条数 (默认 50)"),
 			"offset":      intPropBounds("跳过条数 (默认 0)", 0, 1000000),

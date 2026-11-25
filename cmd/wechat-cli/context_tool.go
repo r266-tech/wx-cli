@@ -355,13 +355,12 @@ func (s *server) finishContextRows(talker string, rows []wcdb.Row) {
 	}
 	setContextTalker(talker, rows)
 	s.attachMessageDisplayNames(rows)
-	if selfWxid := s.selfWxid(); selfWxid != "" {
-		for _, r := range rows {
-			sw := rowString(r, "sender_wxid")
-			if sw != "" {
-				r["is_from_me"] = (sw == selfWxid)
-			}
+	selfWxid := s.selfWxid()
+	for _, r := range rows {
+		if sw := rowString(r, "sender_wxid"); sw != "" && selfWxid != "" {
+			r["is_from_me"] = (sw == selfWxid)
 		}
+		markMessageMentions(r, selfWxid)
 	}
 	for _, r := range rows {
 		if sid := rowInt64(r, "server_id"); sid != 0 {

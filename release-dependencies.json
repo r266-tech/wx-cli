@@ -2,8 +2,8 @@
   "schema_version": 1,
   "wxkey": {
     "repository": "r266-tech/wxkey",
-    "tag": "v1.4.10",
-    "commit_sha": "3bfce0aafb569a5c6dd7747dc16cd32644b03120"
+    "tag": "v1.4.11",
+    "commit_sha": "606afbb985d511befedd0f696b18e1215cf9116f"
   },
   "wcdb": {
     "repository": "Tencent/wcdb",
