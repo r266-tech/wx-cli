@@ -233,21 +233,13 @@ print_human_result() {
       print "    - $warning"
     done
   fi
-  if [[ "$ok" == "true" && "$DRY_RUN" -eq 0 && ( "$MODE" == "install" || "$MODE" == "update" ) ]]; then
-    print
-    local verify_cmd
-    if path_has_bin_dir; then
-      verify_cmd="$APP_NAME sessions --limit 5 --pretty"
-    else
-      verify_cmd="$SHIM_PATH sessions --limit 5 --pretty"
-    fi
-    if [[ "$BOOTSTRAP_RAN" -eq 1 ]]; then
-      print "Next: run $verify_cmd to verify WeChat data access."
-    else
-      print "Next: run $INSTALL_DIR/wxkey bootstrap, then run $verify_cmd to verify WeChat data access."
-    fi
-    print "macOS quiet mode: add $INSTALL_DIR/$APP_NAME and $INSTALL_DIR/wxkey to System Settings > Privacy & Security > Full Disk Access."
-  fi
+}
+
+# An update on a working machine must not send the agent to wxkey bootstrap,
+# which restarts WeChat; ask the installed binary instead of guessing.
+installed_runtime_ready() {
+  [[ -x "$INSTALL_DIR/$APP_NAME" ]] || return 1
+  "$INSTALL_DIR/$APP_NAME" status 2>/dev/null | grep -q '"readiness":"ready"'
 }
 
 finish() {
@@ -259,7 +251,7 @@ finish() {
     else
       verify_cmd="$SHIM_PATH sessions --limit 5 --pretty"
     fi
-    if [[ "$BOOTSTRAP_RAN" -eq 1 ]]; then
+    if [[ "$BOOTSTRAP_RAN" -eq 1 ]] || installed_runtime_ready; then
       NEXT_ACTION="Run $verify_cmd to verify WeChat data access."
     else
       NEXT_ACTION="Run $INSTALL_DIR/wxkey bootstrap, then run $verify_cmd to verify WeChat data access."
@@ -772,6 +764,8 @@ update_source() {
     run_logged_in "$SOURCE_DIR" git pull --ff-only || die "git update failed; resolve the checkout or download the latest release zip" 1
     return
   fi
+  # A verified release package carries its manifest; updating from it is the normal path.
+  [[ -f "$SOURCE_DIR/release-manifest.json" ]] && return
   warn "source_dir is not a git checkout; --update will install the release files in this directory. If you are not using install-release.sh, download the newest release zip first."
 }
 
@@ -1050,6 +1044,8 @@ delete_runtime_keychain_items() {
   [[ -x /usr/bin/security ]] || return 0
   local i
   # One item per WeChat account; delete every item of the service.
+  # security resolves the login keychain from $HOME, so a rehearsal under a
+  # temporary HOME cannot reach the real user's items.
   for i in {1..50}; do
     /usr/bin/security delete-generic-password -s "$RUNTIME_KEYCHAIN_SERVICE" >/dev/null 2>&1 || break
   done
