@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -25,6 +26,9 @@ func TestWhisperCLIArgsPinChineseAndSimplified(t *testing.T) {
 func TestPreferredVoiceEngineFavorsWhisperCPP(t *testing.T) {
 	dir := t.TempDir()
 	cli := filepath.Join(dir, "whisper-cli")
+	if runtime.GOOS == "windows" {
+		cli += ".exe"
+	}
 	model := filepath.Join(dir, "ggml-large-v3-turbo-q5_0.bin")
 	for _, p := range []string{cli, model} {
 		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {

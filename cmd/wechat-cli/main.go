@@ -6331,7 +6331,9 @@ func messageKindWhere(kind, col string) (string, []any, error) {
 	case "music":
 		return col + " IN (?, ?)", []any{packedLocalType(49, 3), packedLocalType(49, 76)}, nil
 	case "link":
-		return col + " IN (?, ?)", []any{packedLocalType(49, 5), packedLocalType(49, 49)}, nil
+		return col + " IN (?, ?, ?)", []any{packedLocalType(49, 4), packedLocalType(49, 5), packedLocalType(49, 49)}, nil
+	case "location_share":
+		return col + " = ?", []any{packedLocalType(49, 17)}, nil
 	case "file":
 		return col + " IN (?, ?)", []any{packedLocalType(49, 6), packedLocalType(49, 8)}, nil
 	case "note":
