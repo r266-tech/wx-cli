@@ -137,3 +137,12 @@ func TestToolErrorCodeReadsMachinePrefix(t *testing.T) {
 		}
 	}
 }
+
+func TestKeychainLoadErrorIsRecognisedThroughWrapping(t *testing.T) {
+	if !isKeychainLoadError(fmt.Errorf("keychain runtime keys unavailable: %w", keystore.ErrAuthorizationDenied)) {
+		t.Fatal("wrapped Keychain denial not recognised")
+	}
+	if isKeychainLoadError(errors.New("config.json: unexpected end of JSON input")) {
+		t.Fatal("config parse error must not be reported as a Keychain problem")
+	}
+}
