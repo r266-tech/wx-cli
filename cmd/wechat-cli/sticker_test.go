@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 
 	"github.com/r266-tech/wx-cli/v2/internal/wcdb"
@@ -20,9 +21,9 @@ func TestStickerFetchVerifiesAndCaches(t *testing.T) {
 	gif := append([]byte("GIF89a"), make([]byte, 64)...)
 	sum := md5.Sum(gif)
 	good := hex.EncodeToString(sum[:])
-	hits := 0
+	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits++
+		hits.Add(1)
 		if r.URL.Path == "/redirect" {
 			http.Redirect(w, r, "http://evil.example/x", http.StatusFound)
 			return
@@ -52,11 +53,11 @@ func TestStickerFetchVerifiesAndCaches(t *testing.T) {
 	if len(images) != 1 || images[0]["sticker"] != true {
 		t.Fatalf("agent images = %v", images)
 	}
-	before := hits
+	before := hits.Load()
 	again := []wcdb.Row{stickerRow(good, srv.URL+"/ok"), stickerRow("0123456789abcdef0123456789abcdef", srv.URL+"/ok")}
 	s.attachStickerImages(again)
-	if hits != before || rowString(again[0], stickerImagePathField) != path {
-		t.Fatalf("second read must use the cache and the failure marker, hits %d -> %d", before, hits)
+	if hits.Load() != before || rowString(again[0], stickerImagePathField) != path {
+		t.Fatalf("second read must use the cache and the failure marker, hits %d -> %d", before, hits.Load())
 	}
 }
 
