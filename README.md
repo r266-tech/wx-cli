@@ -138,6 +138,8 @@ stdout 默认是一行紧凑 JSON。人工查看加 `--pretty`。
 {"ok":false,"error":{"code":"tool_error","message":"...","next_action":"..."}}
 ```
 
+会话名匹配到多个时返回 `chat_ambiguous`，`error.candidates` 列出每个候选的 `id`、`display_name`、`chat_type`，用选中的 `id` 重试即可。
+
 列表字段即使为空也保持为数组，适合 agent 稳定解析。只有 `tail/watch --jsonl` 与 `--follow` 输出 JSONL 事件流，不套标准 envelope。每批事件后追加一条 `type=checkpoint`，包含 `cursor/query/freshness/warnings`，空批次也有；消费端按 `type` 区分消息、会话和检查点，处理完批次后保存检查点游标。
 
 通用调用接口：
@@ -201,6 +203,8 @@ manifest、来源时间、key epoch 和每个数据库的 SHA-256，不改变实
 群消息优先使用可可靠解析的群内昵称作为 `sender`。`sender_wxid` 保留稳定身份，
 `sender_contact_display` 与 `sender_group_nickname` 仅在对应信息可可靠解析时返回。
 群消息里 @ 了你时带 `mentions_me: true`，@所有人 时带 `mentions_all: true`。
+系统消息（入群、撤回、改群名、红包领取等）给出微信界面上显示的那句话，不给原始 XML。
+同名文件被微信存成 `name(1).ext` 时，按这条消息记录的文件大小挑出属于它的那份；大小对不上时全部返回。
 
 图片默认给原图；微信 4.x 的原图多为 WXGF 格式，需要本机有 `ffmpeg`
 （`brew install ffmpeg`）才能转换。只拿得到缩略图时，图片带 `thumbnail: true`，

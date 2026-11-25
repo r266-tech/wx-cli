@@ -62,3 +62,56 @@ func TestPrivateChatQuoteSenderUsesChatName(t *testing.T) {
 		t.Fatalf("quote sender = %v, want the chat display name", q["sender"])
 	}
 }
+
+func TestFileRefsKeepOnlyThisMessagesFile(t *testing.T) {
+	refs := []map[string]any{
+		{"name": "index.html", "file_size": int64(11906), "path": "/x/index.html"},
+		{"name": "index(2).html", "file_size": int64(68385), "path": "/x/index(2).html"},
+	}
+	got := keepDeclaredSizeFileRefs(refs, map[string]any{"name": "index.html", "file_size": int64(68385)})
+	if len(got) != 1 || got[0]["path"] != "/x/index(2).html" {
+		t.Fatalf("want only the size-matching file, got %#v", got)
+	}
+	same := []map[string]any{
+		{"name": "a(3)(1).html", "file_size": int64(5)},
+		{"name": "a(3).html", "file_size": int64(5)},
+	}
+	got = dedupeAgentFileRefs(keepDeclaredSizeFileRefs(same, map[string]any{"name": "a(3).html", "file_size": int64(5)}))
+	if len(got) != 1 || got[0]["name"] != "a(3).html" {
+		t.Fatalf("want the exact-name copy only, got %#v", got)
+	}
+	none := keepDeclaredSizeFileRefs(refs, map[string]any{"file_size": int64(1)})
+	if len(none) != 2 {
+		t.Fatalf("no size match must keep all refs, got %#v", none)
+	}
+}
+
+func TestDeclaredFileFallsBackToResourceSize(t *testing.T) {
+	r := wcdb.Row{
+		"kind_name":              "file",
+		"message_content_parsed": map[string]any{"title": "index.html"},
+		"media_resources":        []map[string]any{{"resource_family": "file", "file_name": "index.html", "size": int64(68385)}},
+	}
+	got := agentDeclaredFile(r)
+	if n, _ := integerArgValue(got["file_size"]); n != 68385 {
+		t.Fatalf("declared size = %#v", got)
+	}
+}
+
+func TestMediaRowFileRefsPickThisMessagesCopy(t *testing.T) {
+	r := wcdb.Row{
+		"kind_name": "file",
+		"resources": []map[string]any{{"resource_family": "file", "file_name": "index.html", "size": int64(68385)}},
+	}
+	refs := []map[string]any{
+		{"name": "index.html", "file_size": int64(11906)},
+		{"name": "index.html", "file_size": int64(68385)},
+	}
+	got := keepDeclaredSizeFileRefs(refs, agentDeclaredFile(r))
+	if len(got) != 1 {
+		t.Fatalf("got %#v", got)
+	}
+	if n, _ := integerArgValue(got[0]["file_size"]); n != 68385 {
+		t.Fatalf("kept the wrong copy: %#v", got)
+	}
+}

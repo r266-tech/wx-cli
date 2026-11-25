@@ -272,7 +272,10 @@ Agent-ready message rows include:
 true), `kind`, `text`, display-ready `images` / `videos` /
 `files` / `link` / `music` / `miniprogram` / `forward_chat` / `quote` /
 `transfer` / `red_packet` / `location` / `voice.transcript` / `solitaire`, and
-concise `warnings`.
+concise `warnings`. System rows carry the sentence WeChat shows, not sysmsg
+XML. A `chat_ambiguous` error lists `error.candidates` (`id`, `display_name`,
+`chat_type`); retry with the chosen `id`. `context` also accepts `--before` /
+`--after` for `--before-count` / `--after-count`.
 `media` remains path/resource-first, but includes `id`, `time`, `time_iso`,
 `sender`, and `kind` so agents can correlate media paths back to timeline rows
 without asking the CLI to interpret image contents.

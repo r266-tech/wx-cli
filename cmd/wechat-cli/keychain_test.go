@@ -127,7 +127,7 @@ func TestAutoMigrateLegacyKeysSkipsWhenNothingToDo(t *testing.T) {
 func TestToolErrorCodeReadsMachinePrefix(t *testing.T) {
 	for msg, want := range map[string]string{
 		"db_keys_missing: no schema-2 DB keys cached":        "db_keys_missing",
-		"chat_ambiguous: \"维尼\" matches a (wxid_a, private)": "chat_ambiguous",
+		"chat_ambiguous: \"小明\" matches a (wxid_a, private)": "chat_ambiguous",
 		"chat_not_found: no chat or contact matches \"x\"":   "chat_not_found",
 		"invalid_argument: \"x\" is a folder session":        "invalid_argument",
 		"message_cursor_stale: original message is gone":     "message_cursor_stale",

@@ -100,6 +100,21 @@ func (s *server) liveChatCandidates(query, typeFilter string, limit int) ([]chat
 	return candidates, warnings, nil
 }
 
+// chatAmbiguousError carries the candidates as data: the CLI redacts account
+// ids in error text, so the agent gets them from error.candidates instead.
+type chatAmbiguousError struct {
+	Query      string
+	Candidates []chatCandidate
+}
+
+func (e *chatAmbiguousError) Error() string {
+	names := make([]string, 0, len(e.Candidates))
+	for _, c := range e.Candidates {
+		names = append(names, fmt.Sprintf("%s (%s, %s)", c.DisplayName, c.Username, c.ChatType))
+	}
+	return fmt.Sprintf("chat_ambiguous: %q matches %s; retry with one of the ids in error.candidates", e.Query, strings.Join(names, "; "))
+}
+
 func (s *server) resolveLiveChat(query, typeFilter string) (string, error) {
 	candidates, warnings, _, err := s.chatCandidates(query, typeFilter, 5)
 	if err != nil {
@@ -109,12 +124,7 @@ func (s *server) resolveLiveChat(query, typeFilter string) (string, error) {
 		return "", fmt.Errorf("chat_not_found: no chat or contact matches %q", query)
 	}
 	if ambiguousChatCandidates(candidates) || (len(warnings) > 0 && !strings.Contains(candidates[0].Match, "_exact")) {
-		// Name the candidates so the agent can retry without another call.
-		names := make([]string, 0, len(candidates))
-		for _, c := range candidates {
-			names = append(names, fmt.Sprintf("%s (%s, %s)", c.DisplayName, c.Username, c.ChatType))
-		}
-		return "", fmt.Errorf("chat_ambiguous: %q matches %s; retry with one of these ids", query, strings.Join(names, "; "))
+		return "", &chatAmbiguousError{Query: query, Candidates: candidates}
 	}
 	return candidates[0].Username, nil
 }
